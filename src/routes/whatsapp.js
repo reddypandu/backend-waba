@@ -10,8 +10,8 @@ import User from '../models/User.js';
 const router = Router();
 const META_API = 'https://graph.facebook.com/v24.0';
 
-// ── Get templates from Meta ───────────────────────────────────────────────────
-router.post('/api', requireAuth, async (req, res) => {
+// ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
+router.post('/', requireAuth, async (req, res) => {
   try {
     const { action, ...params } = req.body;
     const userId = req.user.id;
