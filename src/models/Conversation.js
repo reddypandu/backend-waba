@@ -2,7 +2,8 @@ import mongoose from 'mongoose';
 
 const ConversationSchema = new mongoose.Schema({
   user_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  contact_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact', required: true },
+  contact_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact' },
+  phone_number: { type: String },
   status: { type: String, enum: ['open', 'resolved', 'pending'], default: 'open' },
   last_message: { type: String },
   last_message_at: { type: Date, default: Date.now },

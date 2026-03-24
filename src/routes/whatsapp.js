@@ -83,11 +83,65 @@ router.post('/', requireAuth, async (req, res) => {
       return res.json({ contacts });
     }
 
+    if (action === 'send_message') {
+      const { to, content } = params;
+      const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp', to,
+          type: 'text', text: { body: content }
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Failed to send' });
+      
+      const msgId = data.messages?.[0]?.id;
+      // Find or create conversation
+      const contact = await Contact.findOne({ user_id: userId, phone_number: to });
+      const conv = await Conversation.findOneAndUpdate(
+        { user_id: userId, contact_id: contact?._id || null, phone_number: to },
+        { $set: { last_message: content, last_message_at: new Date() } },
+        { upsert: true, new: true }
+      );
+
+      await Message.create({
+        user_id: userId, conversation_id: conv._id, contact_id: contact?._id,
+        direction: 'outbound', message_type: 'text', content, phone_number: to,
+        whatsapp_message_id: msgId, status: 'sent'
+      });
+      return res.json({ success: true, message_id: msgId });
+    }
+
     res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
     console.error('WhatsApp API error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Inbox (Conversations & Messages) ──────────────────────────────────────────
+router.get('/conversations', requireAuth, async (req, res) => {
+  try {
+    const convs = await Conversation.find({ user_id: req.user.id })
+      .populate('contact_id')
+      .sort({ last_message_at: -1 });
+    res.json({ conversations: convs });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/messages/:convId', requireAuth, async (req, res) => {
+  try {
+    const messages = await Message.find({ 
+      user_id: req.user.id, 
+      conversation_id: req.params.convId 
+    }).sort({ createdAt: 1 });
+    
+    // Mark as read
+    await Conversation.findByIdAndUpdate(req.params.convId, { unread_count: 0 });
+    
+    res.json({ messages });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Campaigns ─────────────────────────────────────────────────────────────────

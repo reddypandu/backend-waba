@@ -96,7 +96,7 @@ async function processMessage(msg, value, wabaId) {
 
   const conversation = await Conversation.findOneAndUpdate(
     { user_id: userId, contact_id: contact._id },
-    { $set: { last_message: content, last_message_at: new Date(), status: 'open' }, $inc: { unread_count: 1 } },
+    { $set: { phone_number: from, last_message: content, last_message_at: new Date(), status: 'open' }, $inc: { unread_count: 1 } },
     { upsert: true, new: true }
   );
 

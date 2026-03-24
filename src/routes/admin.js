@@ -232,4 +232,14 @@ router.post('/whatsapp-profile', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.post('/whatsapp-profile-picture', requireAuth, async (req, res) => {
+  try {
+    const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
+    
+    // To implement real upload, we need multer in express.
+    res.status(501).json({ error: 'Logo upload is currently managed via Meta Dashboard. Direct upload coming soon.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;
