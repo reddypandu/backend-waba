@@ -98,9 +98,15 @@ router.post('/', requireAuth, async (req, res) => {
       
       const msgId = data.messages?.[0]?.id;
       // Find or create conversation
-      const contact = await Contact.findOne({ user_id: userId, phone_number: to });
+      // Ensure contact exists for the conversation to group correctly
+      const contact = await Contact.findOneAndUpdate(
+        { user_id: userId, phone_number: to },
+        { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
+        { upsert: true, new: true }
+      );
+      
       const conv = await Conversation.findOneAndUpdate(
-        { user_id: userId, contact_id: contact?._id || null, phone_number: to },
+        { user_id: userId, contact_id: contact._id, phone_number: to },
         { $set: { last_message: content, last_message_at: new Date() } },
         { upsert: true, new: true }
       );
@@ -110,7 +116,7 @@ router.post('/', requireAuth, async (req, res) => {
         direction: 'outbound', message_type: 'text', content, phone_number: to,
         whatsapp_message_id: msgId, status: 'sent'
       });
-      return res.json({ success: true, message_id: msgId });
+      return res.json({ success: true, message_id: msgId, conversation_id: conv._id });
     }
 
     if (action === 'edit_template') {
@@ -190,50 +196,184 @@ router.post('/campaigns', requireAuth, async (req, res) => {
     const { name, template_name, audience_type = 'existing', schedule_type = 'now', scheduled_at, contacts = [] } = req.body;
     if (!name) return res.status(400).json({ error: 'Campaign name required' });
 
+    let campaignContactIds = [];
+    if (audience_type === 'existing' && contacts?.length > 0) {
+      campaignContactIds = contacts;
+    } else if (audience_type === 'existing') {
+      const allContacts = await Contact.find({ user_id: req.user.id });
+      campaignContactIds = allContacts.map(c => c._id);
+    }
+
+    const campaign = await Campaign.create({
+      user_id: req.user.id,
+      name,
+      template_name,
+      audience_type,
+      schedule_type,
+      scheduled_at: scheduled_at || null,
+      total_contacts: campaignContactIds.length,
+      contact_ids: campaignContactIds, // Assuming we added this to model if not already exists
+      status: schedule_type === 'scheduled' ? 'scheduled' : 'draft',
+    });
+
+    res.json({ success: true, campaign_id: campaign._id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, user_id: req.user.id });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.status === 'running') return res.status(400).json({ error: 'Campaign already running' });
+
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured' });
 
-    let finalContacts = contacts;
-    if (audience_type === 'existing') {
-      const allContacts = await Contact.find({ user_id: req.user.id });
-      finalContacts = allContacts.map(c => c.phone_number);
-    }
+    campaign.status = 'running';
+    campaign.started_at = new Date();
+    await campaign.save();
 
-    if (!finalContacts.length) return res.status(400).json({ error: 'No contacts found for this audience' });
+    // Fire and forget (or use a background worker if available)
+    (async () => {
+      const { template_name, contact_ids } = campaign;
+      const contacts = await Contact.find({ _id: { $in: contact_ids } });
+      
+      let sent = 0, failed = 0;
+      for (const contact of contacts) {
+        try {
+          const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              to: contact.phone_number,
+              type: 'template',
+              template: { name: template_name, language: { code: 'en' } } 
+            }),
+          });
+          const data = await r.json();
+          const msgId = data.messages?.[0]?.id;
+          
+          if (r.ok) {
+            sent++;
+            // Create outgoing message link to campaign
+            await Message.create({
+              user_id: req.user.id,
+              contact_id: contact._id,
+              campaign_id: campaign._id,
+              direction: 'outbound',
+              message_type: 'template',
+              template_name,
+              phone_number: contact.phone_number,
+              whatsapp_message_id: msgId,
+              status: 'sent'
+            });
+          } else {
+            failed++;
+            await Message.create({
+               user_id: req.user.id,
+               contact_id: contact._id,
+               campaign_id: campaign._id,
+               direction: 'outbound',
+               message_type: 'template',
+               template_name,
+               phone_number: contact.phone_number,
+               status: 'failed',
+               error_details: data.error?.message
+            });
+          }
+        } catch (err) {
+          failed++;
+          console.error(`Send error for ${contact.phone_number}:`, err.message);
+        }
+      }
+      campaign.status = 'completed';
+      campaign.completed_at = new Date();
+      await campaign.save();
+      await User.findByIdAndUpdate(req.user.id, { $inc: { 'subscription.messages_used': sent } });
+    })().catch(e => console.error('Campaign background loop error:', e));
 
-    const campaign = await Campaign.create({
-      user_id: req.user.id, name, template_name,
-      audience_type, schedule_type, scheduled_at: scheduled_at || null,
-      total_recipients: finalContacts.length, status: 'running',
+    res.json({ success: true, message: 'Campaign started successfully' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/campaigns/:id/stats', requireAuth, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const stats = await Message.aggregate([
+      { $match: { campaign_id: new mongoose.Types.ObjectId(campaignId) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]);
+
+    const result = {
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      failed: 0,
+      replied: 0
+    };
+
+    stats.forEach(s => {
+      if (s._id === 'sent') result.sent = s.count;
+      else if (s._id === 'delivered') result.delivered = s.count;
+      else if (s._id === 'read') result.read = s.count;
+      else if (s._id === 'failed') result.failed = s.count;
+      else if (s._id === 'replied') result.replied = s.count;
     });
 
-    // Send messages and log
-    let sent = 0, failed = 0;
-    for (const phone of finalContacts) {
+    // Special case: 'sent' includes everything that got out
+    // In many UIs, 'Sent' is treated as total attempted successfully
+    // We'll return them raw and let frontend decide
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/campaigns/:id/retarget', requireAuth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, user_id: req.user.id });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    // Find messages that failed for this campaign
+    const failedMessages = await Message.find({ campaign_id: campaign._id, status: 'failed' });
+    if (failedMessages.length === 0) return res.json({ success: true, sent: 0, message: 'No failed messages to retarget' });
+
+    const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    
+    let sent = 0;
+    for (const msg of failedMessages) {
       try {
         const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messaging_product: 'whatsapp', to: phone, type: 'template', template: { name: template_name, language: { code: 'en' } } }),
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            to: msg.phone_number,
+            type: 'template',
+            template: { name: campaign.template_name, language: { code: 'en' } }
+          }),
         });
         const data = await r.json();
-        const msgId = data.messages?.[0]?.id;
-        campaign.logs.push({ phone_number: phone, status: r.ok ? 'sent' : 'failed', whatsapp_message_id: msgId });
-        if (r.ok) sent++; else failed++;
-      } catch (_) {
-        campaign.logs.push({ phone_number: phone, status: 'failed' });
-        failed++;
-      }
+        if (r.ok) {
+          sent++;
+          await Message.findByIdAndUpdate(msg._id, { 
+            status: 'sent', 
+            whatsapp_message_id: data.messages?.[0]?.id,
+            error_details: null 
+          });
+        }
+      } catch (_) {}
     }
-    campaign.sent_count = sent;
-    campaign.failed_count = failed;
-    campaign.status = 'completed';
-    await campaign.save();
+    res.json({ success: true, sent });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-    // Increment user messages_used
-    await User.findByIdAndUpdate(req.user.id, { $inc: { 'subscription.messages_used': sent } });
-
-    res.json({ success: true, campaign_id: campaign._id, sent, failed });
+router.get('/messages-by-campaign/:id', requireAuth, async (req, res) => {
+  try {
+    const messages = await Message.find({ 
+      user_id: req.user.id, 
+      campaign_id: req.params.id 
+    }).sort({ createdAt: 1 });
+    res.json({ messages });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

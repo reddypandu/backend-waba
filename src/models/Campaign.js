@@ -18,11 +18,14 @@ const CampaignSchema = new mongoose.Schema({
   audience_type: { type: String, enum: ['existing', 'excel'], default: 'existing' },
   schedule_type: { type: String, enum: ['now', 'later'], default: 'now' },
   scheduled_at: { type: Date },
-  total_recipients: { type: Number, default: 0 },
+  total_contacts: { type: Number, default: 0 },
+  contact_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Contact' }],
   sent_count: { type: Number, default: 0 },
   delivered_count: { type: Number, default: 0 },
   read_count: { type: Number, default: 0 },
   failed_count: { type: Number, default: 0 },
+  started_at: { type: Date },
+  completed_at: { type: Date },
   logs: [CampaignLogSchema],
 }, { timestamps: true });
 

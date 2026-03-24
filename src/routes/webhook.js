@@ -36,19 +36,26 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     if (body.object !== 'whatsapp_business_account') return;
 
     for (const entry of body.entry) {
+      const wabaId = entry.id;
       for (const change of entry.changes) {
         const value = change.value;
         const metadata = value.metadata;
         const phoneNumberId = metadata?.phone_number_id;
 
+        console.log(`[Webhook] Event: ${change.field}, WABA: ${wabaId}, PNID: ${phoneNumberId}`);
+
         // Mark as verified if we find an account
-        if (phoneNumberId) {
-          await WhatsAppAccount.findOneAndUpdate({ phone_number_id: phoneNumberId }, { webhook_verified: true }).catch(() => {});
+        if (phoneNumberId || wabaId) {
+          await WhatsAppAccount.findOneAndUpdate(
+            { $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }] }, 
+            { webhook_verified: true }
+          ).catch(() => {});
         }
 
         // 1. Template Status Updates
         if (change.field === 'message_template_status_update') {
           const { message_template_id, message_template_name, event } = value;
+          console.log(`[Webhook] Template Update: ${message_template_name} -> ${event}`);
           await Template.findOneAndUpdate(
             { name: message_template_name }, 
             { status: event || 'APPROVED' }
@@ -67,7 +74,8 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
         if (value.messages) {
           for (const msg of value.messages) {
-            await processMessage(msg, value, phoneNumberId).catch(e => console.error('Msg error:', e.message));
+            console.log(`[Webhook] Inbound message from ${msg.from}`);
+            await processMessage(msg, value, phoneNumberId, wabaId).catch(e => console.error('Msg error:', e.message));
           }
         }
       }
@@ -78,7 +86,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 });
 
 // ── Process Inbound Message ───────────────────────────────────────────────────
-async function processMessage(msg, value, phoneNumberId) {
+async function processMessage(msg, value, phoneNumberId, wabaId) {
   const from = msg.from;
   const contactName = value.contacts?.[0]?.profile?.name || from;
 
@@ -88,8 +96,15 @@ async function processMessage(msg, value, phoneNumberId) {
   else if (msg.type === 'video') content = msg.video?.caption || '[Video]';
   else if (msg.type === 'document') content = msg.document?.filename || '[Document]';
 
-  const waAccount = await WhatsAppAccount.findOne({ phone_number_id: phoneNumberId });
-  if (!waAccount) return;
+  // Find account by either ID
+  const waAccount = await WhatsAppAccount.findOne({
+    $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }]
+  });
+  
+  if (!waAccount) {
+    console.error(`[Webhook] Account not found for PNID: ${phoneNumberId}, WABA: ${wabaId}`);
+    return;
+  }
   const userId = waAccount.user_id;
 
   const contact = await Contact.findOneAndUpdate(
