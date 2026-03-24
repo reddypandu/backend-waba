@@ -24,6 +24,12 @@ app.use(
 app.options("*", cors()); // Handle preflight requests BEFORE rate limiter
 app.use(express.json());
 
+// ── Request Logging ──────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
 // ── Rate Limiting ────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
@@ -59,6 +65,21 @@ app.get("/", (req, res) =>
 app.get("/health", (req, res) =>
   res.json({ status: "ok", uptime: process.uptime() }),
 );
+
+// ── 404 Handler ──────────────────────────────────────────────────────────────
+app.use((req, res) => {
+  console.warn(`404 - ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ error: "Route not found" });
+});
+
+// ── Global Error Handler ─────────────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error("Global Error Handler:", err);
+  res.status(err.status || 500).json({
+    error: err.message || "Internal server error",
+    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
+  });
+});
 
 const PORT = process.env.PORT || 5005;
 app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
