@@ -113,6 +113,23 @@ router.post('/', requireAuth, async (req, res) => {
       return res.json({ success: true, message_id: msgId });
     }
 
+    if (action === 'edit_template') {
+      const { id, category, components } = params;
+      const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: params.name, category, components }),
+      });
+      const data = await r.json();
+      if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Meta API error' });
+      
+      await Template.findOneAndUpdate(
+        { user_id: userId, name: params.name },
+        { category, components, status: 'PENDING' }
+      );
+      return res.json({ success: true });
+    }
+
     res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
     console.error('WhatsApp API error:', err);
@@ -141,6 +158,14 @@ router.get('/messages/:convId', requireAuth, async (req, res) => {
     await Conversation.findByIdAndUpdate(req.params.convId, { unread_count: 0 });
     
     res.json({ messages });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/templates/:id', requireAuth, async (req, res) => {
+  try {
+    const template = await Template.findOne({ _id: req.params.id, user_id: req.user.id });
+    if (!template) return res.status(404).json({ error: 'Template not found locally' });
+    res.json({ template });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
