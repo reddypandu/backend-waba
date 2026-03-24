@@ -80,15 +80,23 @@ router.post('/campaigns', requireAuth, async (req, res) => {
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured' });
 
+    let finalContacts = contacts;
+    if (audience_type === 'existing') {
+      const allContacts = await Contact.find({ user_id: req.user.id });
+      finalContacts = allContacts.map(c => c.phone_number);
+    }
+
+    if (!finalContacts.length) return res.status(400).json({ error: 'No contacts found for this audience' });
+
     const campaign = await Campaign.create({
       user_id: req.user.id, name, template_name,
       audience_type, schedule_type, scheduled_at: scheduled_at || null,
-      total_recipients: contacts.length, status: 'running',
+      total_recipients: finalContacts.length, status: 'running',
     });
 
     // Send messages and log
     let sent = 0, failed = 0;
-    for (const phone of contacts) {
+    for (const phone of finalContacts) {
       try {
         const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
           method: 'POST',

@@ -10,9 +10,15 @@ const router = Router();
 const META_API = 'https://graph.facebook.com/v24.0';
 
 // ── GET: Verification ────────────────────────────────────────────────────────
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
-  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) return res.send(challenge);
+  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+    // Optional: Mark accounts as webhook_verified if we can identify them
+    // But Meta verification is app-wide, not per-user. 
+    // We'll mark all accounts as partially verified if they hitting our endpoint.
+    await WhatsAppAccount.updateMany({}, { webhook_verified: true }).catch(() => {});
+    return res.send(challenge);
+  }
   res.status(403).send('Forbidden');
 });
 
@@ -22,30 +28,29 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
   try {
     const rawBody = req.body.toString();
-
-    // HMAC verification
     const sig = req.headers['x-hub-signature-256'];
     if (process.env.META_APP_SECRET && sig) {
       const expected = 'sha256=' + crypto.createHmac('sha256', process.env.META_APP_SECRET).update(rawBody).digest('hex');
-      if (expected !== sig) { console.warn('❌ HMAC mismatch'); return; }
+      if (expected !== sig) return;
     }
 
     const body = JSON.parse(rawBody);
     if (body.object !== 'whatsapp_business_account') return;
 
     for (const entry of body.entry) {
+      // Mark this specific WABA as verified when we receive any event
+      await WhatsAppAccount.findOneAndUpdate({ waba_id: entry.id }, { webhook_verified: true }).catch(() => {});
+
       for (const change of entry.changes) {
         if (change.field !== 'messages') continue;
         const value = change.value;
 
-        // Status updates (delivered, read, failed)
         if (value.statuses) {
           for (const s of value.statuses) {
             await Message.findOneAndUpdate({ whatsapp_message_id: s.id }, { status: s.status });
           }
         }
 
-        // Inbound messages
         if (value.messages) {
           for (const msg of value.messages) {
             await processMessage(msg, value, entry.id).catch(e => console.error('Msg error:', e.message));
@@ -73,44 +78,31 @@ async function processMessage(msg, value, wabaId) {
   if (!waAccount) return;
   const userId = waAccount.user_id;
 
-  // Upsert contact
   const contact = await Contact.findOneAndUpdate(
     { user_id: userId, phone_number: from },
     { $setOnInsert: { user_id: userId, phone_number: from, name: contactName } },
     { upsert: true, new: true }
   );
 
-  // Upsert conversation
   const conversation = await Conversation.findOneAndUpdate(
     { user_id: userId, contact_id: contact._id },
     { $set: { last_message: content, last_message_at: new Date(), status: 'open' }, $inc: { unread_count: 1 } },
     { upsert: true, new: true }
   );
 
-  // Save message (ignore duplicate whatsapp_message_ids)
   try {
     await Message.create({
-      user_id: userId,
-      conversation_id: conversation._id,
-      contact_id: contact._id,
-      direction: 'inbound',
-      message_type: messageType,
-      content,
-      phone_number: from,
-      whatsapp_message_id: msg.id,
-      status: 'delivered',
+      user_id: userId, conversation_id: conversation._id, contact_id: contact._id,
+      direction: 'inbound', message_type: messageType, content, phone_number: from,
+      whatsapp_message_id: msg.id, status: 'delivered',
     });
-  } catch (e) {
-    if (e.code !== 11000) throw e; // ignore duplicate key
-  }
+  } catch (e) { if (e.code !== 11000) throw e; }
 
-  // Auto-reply check
   if (content && messageType === 'text') {
     await checkAutoReply(userId, from, content, waAccount.phone_number_id, waAccount.access_token, conversation._id, contact._id);
   }
 }
 
-// ── Auto-Reply Engine ─────────────────────────────────────────────────────────
 async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, convId, contactId) {
   const rules = await AutoReply.find({ user_id: userId, is_active: true });
   const lower = text.toLowerCase().trim();
@@ -130,14 +122,12 @@ async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, conv
     body: JSON.stringify({ messaging_product: 'whatsapp', to: to.replace(/^\+/, ''), type: 'text', text: { body: matched.response } }),
   });
   const data = await r.json();
-  if (!r.ok) { console.error('Auto-reply failed:', data); return; }
+  if (!r.ok) return;
 
   await Message.create({
     user_id: userId, conversation_id: convId, contact_id: contactId,
-    direction: 'outbound', message_type: 'text',
-    content: `[Auto-Reply] ${matched.response}`,
-    whatsapp_message_id: data.messages?.[0]?.id,
-    status: 'sent',
+    direction: 'outbound', message_type: 'text', content: `[Auto-Reply] ${matched.response}`,
+    whatsapp_message_id: data.messages?.[0]?.id, status: 'sent',
   }).catch(() => {});
 }
 

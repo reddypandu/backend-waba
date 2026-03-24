@@ -50,8 +50,8 @@ router.post('/contacts', requireAuth, async (req, res) => {
     const { name, phone_number, email, tags, notes } = req.body;
     const contact = await Contact.findOneAndUpdate(
       { user_id: req.user.id, phone_number },
-      { $set: { name, email, tags, notes } },
-      { upsert: true, new: true }
+      { $set: { name, email, tags, notes, user_id: req.user.id, phone_number } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
     );
     res.json(contact);
   } catch (err) { res.status(500).json({ error: err.message }); }
