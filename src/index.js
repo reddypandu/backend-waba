@@ -14,7 +14,14 @@ import authRoutes from "./routes/auth.js";
 
 const app = express();
 
-app.use(cors({ origin: "*" }));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    credentials: true,
+  }),
+);
+app.options("*", cors()); // Handle preflight requests BEFORE rate limiter
 app.use(express.json());
 
 // ── Rate Limiting ────────────────────────────────────────────────────────────
@@ -24,12 +31,14 @@ const authLimiter = rateLimit({
   message: { error: "Too many requests. Please try again after an hour." },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS", // Skip preflight requests
 });
 
 const apiLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutes
   max: 100,
   message: { error: "Too many requests. Please slow down." },
+  skip: (req) => req.method === "OPTIONS", // Skip preflight requests
 });
 
 app.use("/api/auth", authLimiter, authRoutes);
