@@ -60,7 +60,7 @@ router.post('/', requireAuth, async (req, res) => {
         // 6. Upsert WhatsApp account
         await WhatsAppAccount.findOneAndUpdate(
           { user_id: userId },
-          { phone_number_id, waba_id, access_token: accessToken, phone_number, business_id: biz._id, verification_status: 'verified', webhook_verified: true },
+          { phone_number_id, waba_id, access_token: accessToken, phone_number: phoneNumber, business_id: biz._id, verification_status: 'verified', webhook_verified: true },
           { upsert: true, new: true }
         );
 
