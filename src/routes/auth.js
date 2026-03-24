@@ -15,13 +15,16 @@ const asyncHandler = (fn) => (req, res, next) => {
 router.post(
   "/signup",
   asyncHandler(async (req, res) => {
+    console.log("📝 Signup request received:", { email: req.body?.email });
     let connection;
     try {
-      const { email, password, full_name } = req.body;
+      const { email, password, full_name } = req.body || {};
       if (!email || !password)
         return res.status(400).json({ error: "Email and password required" });
 
+      console.log("🔗 Getting database connection...");
       connection = await pool.getConnection();
+      console.log("✅ Connection acquired, starting transaction...");
       await connection.beginTransaction();
 
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -32,6 +35,7 @@ router.post(
       );
 
       const userId = userResult.insertId;
+      console.log("✅ User created:", userId);
 
       // Initialize Profile
       await connection.execute(
@@ -58,18 +62,19 @@ router.post(
       );
 
       await connection.commit();
+      console.log("✅ Transaction committed");
 
       const token = jwt.sign({ id: userId, email }, JWT_SECRET, {
         expiresIn: "7d",
       });
-      res.json({ user: { id: userId, email, full_name }, token });
+      res.status(201).json({ user: { id: userId, email, full_name }, token });
     } catch (err) {
-      console.error("Signup Error:", err);
+      console.error("❌ Signup Error:", err.message, err.code);
       if (connection) {
         try {
           await connection.rollback();
         } catch (rollbackErr) {
-          console.error("Rollback Error:", rollbackErr);
+          console.error("❌ Rollback Error:", rollbackErr.message);
         }
       }
       if (err.code === "ER_DUP_ENTRY")
@@ -85,21 +90,33 @@ router.post(
 router.post(
   "/login",
   asyncHandler(async (req, res) => {
+    console.log("🔑 Login request received:", { email: req.body?.email });
     try {
-      const { email, password } = req.body;
+      const { email, password } = req.body || {};
       if (!email || !password)
         return res.status(400).json({ error: "Email and password required" });
 
+      console.log("🔍 Querying user...");
       const [users] = await pool.execute(
         "SELECT * FROM users WHERE email = ?",
         [email],
       );
       const user = users[0];
+      console.log("✅ Query result:", user ? "User found" : "User not found");
 
-      if (!user || !(await bcrypt.compare(password, user.password))) {
+      if (!user) {
+        console.log("❌ Login failed: User not found");
         return res.status(401).json({ error: "Invalid email or password" });
       }
 
+      console.log("🔐 Comparing passwords...");
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        console.log("❌ Login failed: Invalid password");
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      console.log("✅ Password valid, generating token...");
       const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, {
         expiresIn: "7d",
       });
@@ -113,7 +130,7 @@ router.post(
         token,
       });
     } catch (err) {
-      console.error("Login Error:", err);
+      console.error("❌ Login Error:", err.message, err.code);
       res.status(500).json({ error: err.message || "Login failed" });
     }
   }),

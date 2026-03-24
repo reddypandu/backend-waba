@@ -11,8 +11,20 @@ import otpRoutes from "./routes/otp.js";
 import adminRoutes from "./routes/admin.js";
 import mongoRoutes from "./routes/mongo.js";
 import authRoutes from "./routes/auth.js";
+import pool from "./config/db.js";
 
 const app = express();
+
+// Test database connection
+pool
+  .getConnection()
+  .then((conn) => {
+    console.log("✅ Database connected successfully");
+    conn.release();
+  })
+  .catch((err) => {
+    console.error("❌ Database connection failed:", err.message);
+  });
 
 app.use(
   cors({
@@ -21,12 +33,16 @@ app.use(
     credentials: true,
   }),
 );
-app.options("*", cors()); // Handle preflight requests BEFORE rate limiter
-app.use(express.json());
+app.options("*", cors());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // ── Request Logging ──────────────────────────────────────────────────────────
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`,
+    req.body ? `Body: ${JSON.stringify(req.body).substring(0, 100)}` : "",
+  );
   next();
 });
 
