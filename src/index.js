@@ -17,7 +17,11 @@ connectDB();
 
 const app = express();
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], credentials: true }));
+app.use(cors({ 
+  origin: (origin, callback) => callback(null, true), // Mirror origin (required for credentials)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], 
+  credentials: true 
+}));
 app.options('*', cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -30,14 +34,14 @@ app.use((req, res, next) => {
 
 // ── Rate Limiting ────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
-  message: { error: 'Too many requests. Please try again after an hour.' },
+  windowMs: 15 * 60 * 1000, // 15 mins
+  max: 100, // Increase for testing
+  message: { error: 'Too many login attempts. Please try again later.' },
   skip: (req) => req.method === 'OPTIONS',
 });
 const apiLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
-  max: 100,
+  max: 1000,
   skip: (req) => req.method === 'OPTIONS',
 });
 
