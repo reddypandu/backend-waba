@@ -377,4 +377,29 @@ router.get('/messages-by-campaign/:id', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.get('/templates/all', requireAuth, async (req, res) => {
+  try {
+    const templates = await Template.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    res.json({ templates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/contacts/batch', requireAuth, async (req, res) => {
+  try {
+    const { contacts } = req.body;
+    if (!Array.isArray(contacts)) return res.status(400).json({ error: 'Contacts array required' });
+
+    const createdIds = [];
+    for (const c of contacts) {
+      const contact = await Contact.findOneAndUpdate(
+        { user_id: req.user.id, phone_number: c.phone },
+        { $set: { name: c.name || c.phone } },
+        { upsert: true, new: true }
+      );
+      createdIds.push(contact._id);
+    }
+    res.json({ success: true, ids: createdIds });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;
