@@ -17,12 +17,15 @@ connectDB();
 
 const app = express();
 
+// ── CORS (Must be at the very top) ───────────────────────────────────────────
 app.use(cors({ 
-  origin: (origin, callback) => callback(null, true), // Mirror origin (required for credentials)
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], 
-  credentials: true 
+  origin: (origin, callback) => callback(null, true), 
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 app.options('*', cors());
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
