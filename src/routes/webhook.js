@@ -36,14 +36,19 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     if (body.object !== 'whatsapp_business_account') return;
 
     for (const entry of body.entry) {
-      // Mark as verified
-      await WhatsAppAccount.findOneAndUpdate({ waba_id: entry.id }, { webhook_verified: true }).catch(() => {});
-
       for (const change of entry.changes) {
+        const value = change.value;
+        const metadata = value.metadata;
+        const phoneNumberId = metadata?.phone_number_id;
+
+        // Mark as verified if we find an account
+        if (phoneNumberId) {
+          await WhatsAppAccount.findOneAndUpdate({ phone_number_id: phoneNumberId }, { webhook_verified: true }).catch(() => {});
+        }
+
         // 1. Template Status Updates
         if (change.field === 'message_template_status_update') {
-          const { message_template_id, message_template_name, event } = change.value;
-          const statusMap = { 'APPROVED': 'APPROVED', 'REJECTED': 'REJECTED', 'PENDING': 'PENDING' };
+          const { message_template_id, message_template_name, event } = value;
           await Template.findOneAndUpdate(
             { name: message_template_name }, 
             { status: event || 'APPROVED' }
@@ -53,7 +58,6 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
         // 2. Inbound Messages
         if (change.field !== 'messages') continue;
-        const value = change.value;
 
         if (value.statuses) {
           for (const s of value.statuses) {
@@ -63,7 +67,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
         if (value.messages) {
           for (const msg of value.messages) {
-            await processMessage(msg, value, entry.id).catch(e => console.error('Msg error:', e.message));
+            await processMessage(msg, value, phoneNumberId).catch(e => console.error('Msg error:', e.message));
           }
         }
       }
@@ -74,7 +78,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 });
 
 // ── Process Inbound Message ───────────────────────────────────────────────────
-async function processMessage(msg, value, wabaId) {
+async function processMessage(msg, value, phoneNumberId) {
   const from = msg.from;
   const contactName = value.contacts?.[0]?.profile?.name || from;
 
@@ -84,7 +88,7 @@ async function processMessage(msg, value, wabaId) {
   else if (msg.type === 'video') content = msg.video?.caption || '[Video]';
   else if (msg.type === 'document') content = msg.document?.filename || '[Document]';
 
-  const waAccount = await WhatsAppAccount.findOne({ waba_id: wabaId });
+  const waAccount = await WhatsAppAccount.findOne({ phone_number_id: phoneNumberId });
   if (!waAccount) return;
   const userId = waAccount.user_id;
 
