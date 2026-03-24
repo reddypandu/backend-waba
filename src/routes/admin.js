@@ -192,4 +192,44 @@ router.post('/whatsapp-accounts', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Meta Business Profile ──────────────────────────────────────────────────
+router.get('/whatsapp-profile', requireAuth, async (req, res) => {
+  try {
+    const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
+    
+    // Fetch profile from Meta
+    const r = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`, {
+      headers: { Authorization: `Bearer ${wa.access_token}` }
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || 'Meta API error');
+    
+    res.json(data.data?.[0] || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/whatsapp-profile', requireAuth, async (req, res) => {
+  try {
+    const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
+
+    const { about, address, description, email, websites, vertical } = req.body;
+    
+    // Update Meta Profile
+    const r = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile`, {
+      method: 'POST',
+      headers: { 
+        Authorization: `Bearer ${wa.access_token}`,
+        'Content-Type': 'application/json' 
+      },
+      body: JSON.stringify({ messaging_product: 'whatsapp', about, address, description, email, websites, vertical })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || 'Meta API error');
+
+    res.json({ success: true, data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;

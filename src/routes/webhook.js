@@ -4,6 +4,7 @@ import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import Contact from '../models/Contact.js';
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
+import Template from '../models/Template.js';
 import { AutoReply } from '../models/Automation.js';
 
 const router = Router();
@@ -13,9 +14,6 @@ const META_API = 'https://graph.facebook.com/v24.0';
 router.get('/', async (req, res) => {
   const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
   if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-    // Optional: Mark accounts as webhook_verified if we can identify them
-    // But Meta verification is app-wide, not per-user. 
-    // We'll mark all accounts as partially verified if they hitting our endpoint.
     await WhatsAppAccount.updateMany({}, { webhook_verified: true }).catch(() => {});
     return res.send(challenge);
   }
@@ -24,7 +22,7 @@ router.get('/', async (req, res) => {
 
 // ── POST: Inbound events ─────────────────────────────────────────────────────
 router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
-  res.json({ success: true }); // Respond immediately
+  res.json({ success: true });
 
   try {
     const rawBody = req.body.toString();
@@ -38,10 +36,22 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     if (body.object !== 'whatsapp_business_account') return;
 
     for (const entry of body.entry) {
-      // Mark this specific WABA as verified when we receive any event
+      // Mark as verified
       await WhatsAppAccount.findOneAndUpdate({ waba_id: entry.id }, { webhook_verified: true }).catch(() => {});
 
       for (const change of entry.changes) {
+        // 1. Template Status Updates
+        if (change.field === 'message_template_status_update') {
+          const { message_template_id, message_template_name, event } = change.value;
+          const statusMap = { 'APPROVED': 'APPROVED', 'REJECTED': 'REJECTED', 'PENDING': 'PENDING' };
+          await Template.findOneAndUpdate(
+            { name: message_template_name }, 
+            { status: event || 'APPROVED' }
+          ).catch(() => {});
+          continue;
+        }
+
+        // 2. Inbound Messages
         if (change.field !== 'messages') continue;
         const value = change.value;
 

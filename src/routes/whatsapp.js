@@ -20,10 +20,44 @@ router.post('/', requireAuth, async (req, res) => {
 
     const { access_token, phone_number_id, waba_id } = waAccount;
 
-    if (action === 'get_templates') {
-      const r = await fetch(`${META_API}/${waba_id}/message_templates?limit=50`, { headers: { Authorization: `Bearer ${access_token}` } });
+    if (action === 'get_templates' || action === 'sync_templates') {
+      const r = await fetch(`${META_API}/${waba_id}/message_templates?limit=100`, { headers: { Authorization: `Bearer ${access_token}` } });
       const data = await r.json();
-      return res.json({ templates: data.data || [] });
+      const metaTemplates = data.data || [];
+      
+      // Update local MongoDB templates with statuses from Meta
+      if (action === 'sync_templates') {
+        for (const mt of metaTemplates) {
+          await Template.findOneAndUpdate(
+            { user_id: userId, name: mt.name },
+            { 
+              status: mt.status, 
+              category: mt.category, 
+              language: mt.language,
+              components: mt.components,
+              meta_template_id: mt.id 
+            },
+            { upsert: true }
+          );
+        }
+      }
+      return res.json({ templates: metaTemplates });
+    }
+
+    if (action === 'create_template') {
+      const { name, category, language, components } = params;
+      const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, category, language, components }),
+      });
+      const data = await r.json();
+      if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Meta API error' });
+      
+      const newTemplate = await Template.create({
+        user_id: userId, name, category, language, components, status: 'PENDING', meta_template_id: data.id
+      });
+      return res.json({ success: true, template: newTemplate });
     }
 
     if (action === 'send_template') {
