@@ -1,145 +1,119 @@
 import { Router } from 'express';
-import pool from '../config/db.js';
 import { requireAuth } from '../middleware/auth.js';
+import WhatsAppAccount from '../models/WhatsAppAccount.js';
+import Contact from '../models/Contact.js';
+import Campaign from '../models/Campaign.js';
+import Template from '../models/Template.js';
+import Message from '../models/Message.js';
+import User from '../models/User.js';
 
 const router = Router();
 const META_API = 'https://graph.facebook.com/v24.0';
 
-router.post('/', requireAuth, async (req, res) => {
+// ── Get templates from Meta ───────────────────────────────────────────────────
+router.post('/api', requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
     const { action, ...params } = req.body;
+    const userId = req.user.id;
+    const waAccount = await WhatsAppAccount.findOne({ user_id: userId });
+    if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured. Complete setup first.' });
 
-    // Fetch user's WhatsApp credentials from MySQL
-    const [accounts] = await pool.execute(
-      'SELECT access_token, phone_number_id, waba_id FROM whatsapp_accounts WHERE user_id = ? LIMIT 1',
-      [userId]
-    );
+    const { access_token, phone_number_id, waba_id } = waAccount;
 
-    const waAccount = accounts[0];
-    if (!waAccount?.access_token) {
-      throw new Error('WhatsApp not configured. Complete setup first.');
+    if (action === 'get_templates') {
+      const r = await fetch(`${META_API}/${waba_id}/message_templates?limit=50`, { headers: { Authorization: `Bearer ${access_token}` } });
+      const data = await r.json();
+      return res.json({ templates: data.data || [] });
     }
 
-    const { access_token: WHATSAPP_ACCESS_TOKEN, phone_number_id: WHATSAPP_PHONE_NUMBER_ID, waba_id: WHATSAPP_BUSINESS_ACCOUNT_ID } = waAccount;
-
-    switch (action) {
-      case 'get_templates': {
-        const r = await fetch(`${META_API}/${WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates?limit=100`, {
-          headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` }
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(`Meta API error: ${JSON.stringify(data)}`);
-        return res.json(data);
-      }
-
-      case 'create_template': {
-        const { name, category, language, components } = params;
-        const r = await fetch(`${META_API}/${WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, category, language, components }),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(`Meta API error: ${JSON.stringify(data)}`);
-        return res.json(data);
-      }
-
-      case 'edit_template': {
-        const { template_id, name, category, components } = params;
-        const r = await fetch(`${META_API}/${template_id}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, category, components }),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(`Meta API error: ${JSON.stringify(data)}`);
-        return res.json(data);
-      }
-
-      case 'send_message': {
-        const { to, type, template, text, conversation_id, contact_id } = params;
-        const normalizedTo = to.replace(/^\+/, '');
-
-        let messageBody = { messaging_product: 'whatsapp', to: normalizedTo };
-        if (type === 'template') {
-          messageBody.type = 'template';
-          messageBody.template = template;
-        } else {
-          messageBody.type = 'text';
-          messageBody.text = { body: text };
-        }
-
-        const r = await fetch(`${META_API}/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(messageBody),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(`Meta API error: ${JSON.stringify(data)}`);
-
-        const waMessageId = data.messages?.[0]?.id;
-        
-        // Log message to MySQL
-        await pool.execute(
-          'INSERT INTO chat_messages (user_id, conversation_id, contact_id, direction, message_type, content, whatsapp_message_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [
-            userId, conversation_id, contact_id, 'outbound', 
-            type === 'template' ? 'template' : 'text',
-            type === 'template' ? `Template: ${template?.name}` : text,
-            waMessageId, 'sent'
-          ]
-        );
-
-        if (conversation_id) {
-          await pool.execute(
-            'UPDATE conversations SET last_message = ?, last_message_at = NOW() WHERE id = ?',
-            [type === 'template' ? `Template: ${template.name}` : text, conversation_id]
-          );
-        }
-        return res.json(data);
-      }
-
-      case 'get_campaigns': {
-        const [campaigns] = await pool.execute(
-          'SELECT * FROM campaigns WHERE user_id = ? ORDER BY created_at DESC',
-          [userId]
-        );
-        return res.json(campaigns);
-      }
-
-      case 'get_campaign_detail': {
-        const { id } = params;
-        const [campaigns] = await pool.execute('SELECT * FROM campaigns WHERE id = ? AND user_id = ?', [id, userId]);
-        if (campaigns.length === 0) throw new Error('Campaign not found');
-        
-        const [logs] = await pool.execute(`
-          SELECT cl.*, c.phone_number, c.name as contact_name
-          FROM campaign_logs cl
-          LEFT JOIN contacts c ON cl.contact_id = c.id
-          WHERE cl.campaign_id = ?
-          ORDER BY cl.created_at DESC
-        `, [id]);
-
-        return res.json({ campaign: campaigns[0], logs });
-      }
-
-      case 'create_campaign': {
-        const { name, template_id, audience_type, schedule_type, scheduled_at } = params;
-        const [result] = await pool.execute(
-          'INSERT INTO campaigns (user_id, name, template_id, audience_type, schedule_type, scheduled_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [userId, name, template_id, audience_type, schedule_type, scheduled_at || null, 'draft']
-        );
-        return res.json({ success: true, id: result.insertId });
-      }
-
-      default:
-        return res.status(400).json({ error: 'Unknown action' });
+    if (action === 'send_template') {
+      const { to, template_name, template_language = 'en', components } = params;
+      const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp', to,
+          type: 'template',
+          template: { name: template_name, language: { code: template_language }, components: components || [] },
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Failed to send message' });
+      const msgId = data.messages?.[0]?.id;
+      await Message.create({ user_id: userId, direction: 'outbound', message_type: 'template', template_name, phone_number: to, whatsapp_message_id: msgId, status: 'sent' }).catch(() => {});
+      return res.json({ success: true, message_id: msgId });
     }
+
+    if (action === 'get_contacts') {
+      const contacts = await Contact.find({ user_id: userId }).sort({ createdAt: -1 });
+      return res.json({ contacts });
+    }
+
+    res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
     console.error('WhatsApp API error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+router.get('/campaigns', requireAuth, async (req, res) => {
+  try {
+    const campaigns = await Campaign.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    res.json({ campaigns });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/campaigns/:id', requireAuth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, user_id: req.user.id });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    res.json({ campaign });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/campaigns', requireAuth, async (req, res) => {
+  try {
+    const { name, template_name, audience_type = 'existing', schedule_type = 'now', scheduled_at, contacts = [] } = req.body;
+    if (!name) return res.status(400).json({ error: 'Campaign name required' });
+
+    const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured' });
+
+    const campaign = await Campaign.create({
+      user_id: req.user.id, name, template_name,
+      audience_type, schedule_type, scheduled_at: scheduled_at || null,
+      total_recipients: contacts.length, status: 'running',
+    });
+
+    // Send messages and log
+    let sent = 0, failed = 0;
+    for (const phone of contacts) {
+      try {
+        const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messaging_product: 'whatsapp', to: phone, type: 'template', template: { name: template_name, language: { code: 'en' } } }),
+        });
+        const data = await r.json();
+        const msgId = data.messages?.[0]?.id;
+        campaign.logs.push({ phone_number: phone, status: r.ok ? 'sent' : 'failed', whatsapp_message_id: msgId });
+        if (r.ok) sent++; else failed++;
+      } catch (_) {
+        campaign.logs.push({ phone_number: phone, status: 'failed' });
+        failed++;
+      }
+    }
+    campaign.sent_count = sent;
+    campaign.failed_count = failed;
+    campaign.status = 'completed';
+    await campaign.save();
+
+    // Increment user messages_used
+    await User.findByIdAndUpdate(req.user.id, { $inc: { 'subscription.messages_used': sent } });
+
+    res.json({ success: true, campaign_id: campaign._id, sent, failed });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 export default router;

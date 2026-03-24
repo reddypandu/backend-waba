@@ -1,158 +1,109 @@
 import { Router } from 'express';
-import pool from '../config/db.js';
 import { requireAuth } from '../middleware/auth.js';
+import User from '../models/User.js';
+import Business from '../models/Business.js';
+import WhatsAppAccount from '../models/WhatsAppAccount.js';
+import Contact from '../models/Contact.js';
+import Campaign from '../models/Campaign.js';
+import Template from '../models/Template.js';
+import { AutoReply, Workflow } from '../models/Automation.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 
 const router = Router();
 
-// Get current user's full dashboard data
+// ── /me — Full dashboard data ─────────────────────────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
-    
-    const [profiles] = await pool.execute('SELECT * FROM profiles WHERE user_id = ?', [userId]);
-    const [wallets] = await pool.execute('SELECT * FROM wallets WHERE user_id = ?', [userId]);
-    const [waAccounts] = await pool.execute('SELECT * FROM whatsapp_accounts WHERE user_id = ?', [userId]);
-    const [businesses] = await pool.execute('SELECT * FROM businesses WHERE user_id = ?', [userId]);
-    const [subscriptions] = await pool.execute('SELECT * FROM subscriptions WHERE user_id = ?', [userId]);
+    const user = await User.findById(userId).select('-password');
+    const waAccount = await WhatsAppAccount.findOne({ user_id: userId });
+    const business = await Business.findOne({ user_id: userId });
+    const [contactCount, campaignCount, templateCount] = await Promise.all([
+      Contact.countDocuments({ user_id: userId }),
+      Campaign.countDocuments({ user_id: userId }),
+      Template.countDocuments({ user_id: userId }),
+    ]);
+    const transactions = await WalletTransaction.find({ user_id: userId }).sort({ createdAt: -1 }).limit(20);
 
     res.json({
-      user: req.user,
-      profile: profiles[0] || null,
-      wallet: wallets[0] || { balance: 0 },
-      waAccount: waAccounts[0] || null,
-      business: businesses[0] || null,
-      subscription: subscriptions[0] || { plan: 'free', status: 'active' }
+      user: { id: user._id, email: user.email, full_name: user.full_name, role: user.role },
+      subscription: user.subscription,
+      wallet: user.wallet,
+      waAccount,
+      business,
+      stats: { contacts: contactCount, campaigns: campaignCount, templates: templateCount },
+      transactions,
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get all users (Admin only)
-router.get('/users', requireAuth, async (req, res) => {
+// ── Contacts CRUD ─────────────────────────────────────────────────────────────
+router.get('/contacts', requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: admin access required' });
-    }
-
-    const [users] = await pool.execute(`
-      SELECT u.id, u.email, u.full_name, u.role, u.created_at,
-             w.balance as wallet_balance,
-             wa.phone_number as whatsapp_number,
-             s.plan as subscription_plan
-      FROM users u
-      LEFT JOIN wallets w ON u.id = w.user_id
-      LEFT JOIN whatsapp_accounts wa ON u.id = wa.user_id
-      LEFT JOIN subscriptions s ON u.id = s.user_id
-      ORDER BY u.created_at DESC
-    `);
-
-    res.json({ users, stats: { total_users: users.length } });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const contacts = await Contact.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    res.json(contacts);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Upsert Business
-router.post('/businesses', requireAuth, async (req, res) => {
+router.post('/contacts', requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const { name, website, industry, country, timezone, meta_business_id } = req.body;
-    
-    const [result] = await pool.execute(
-      `INSERT INTO businesses (user_id, name, website, industry, country, timezone, meta_business_id) 
-       VALUES (?, ?, ?, ?, ?, ?, ?) 
-       ON DUPLICATE KEY UPDATE name=VALUES(name), website=VALUES(website), industry=VALUES(industry), 
-       country=VALUES(country), timezone=VALUES(timezone), meta_business_id=VALUES(meta_business_id)`,
-      [userId, name, website, industry, country, timezone, meta_business_id]
+    const { name, phone_number, email, tags, notes } = req.body;
+    const contact = await Contact.findOneAndUpdate(
+      { user_id: req.user.id, phone_number },
+      { $set: { name, email, tags, notes } },
+      { upsert: true, new: true }
     );
-    
-    res.json({ success: true, id: result.insertId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    res.json(contact);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Upsert WhatsApp Account
-router.post('/whatsapp-accounts', requireAuth, async (req, res) => {
+router.put('/contacts/:id', requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const { phone_number, phone_number_id, waba_id, access_token, verification_status } = req.body;
-    
-    // Check if business exists
-    const [businesses] = await pool.execute('SELECT id FROM businesses WHERE user_id = ? LIMIT 1', [userId]);
-    const businessId = businesses[0]?.id;
-    if (!businessId) throw new Error('Business details not found');
-
-    const [result] = await pool.execute(
-      `INSERT INTO whatsapp_accounts (user_id, business_id, phone_number, phone_number_id, waba_id, access_token, verification_status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?) 
-       ON DUPLICATE KEY UPDATE 
-       phone_number=VALUES(phone_number), phone_number_id=VALUES(phone_number_id), 
-       waba_id=VALUES(waba_id), access_token=VALUES(access_token), 
-       verification_status=VALUES(verification_status)`,
-      [userId, businessId, phone_number, phone_number_id, waba_id, access_token, verification_status || 'pending']
-    );
-    
-    res.json({ success: true, id: result.insertId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const contact = await Contact.findOneAndUpdate({ _id: req.params.id, user_id: req.user.id }, req.body, { new: true });
+    res.json(contact);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- Design Templates (Admin Only) ---
-
-router.get('/designs', requireAuth, async (req, res) => {
+router.delete('/contacts/:id', requireAuth, async (req, res) => {
   try {
-    const [designs] = await pool.execute('SELECT * FROM design_templates ORDER BY created_at DESC');
-    res.json(designs);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/designs', requireAuth, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    const { name, category, image_url, default_heading, default_subheading, default_footer, text_color, accent_color } = req.body;
-    
-    const [result] = await pool.execute(
-      `INSERT INTO design_templates (name, category, image_url, default_heading, default_subheading, default_footer, text_color, accent_color, created_by) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, category, image_url, default_heading, default_subheading, default_footer, text_color, accent_color, req.user.id]
-    );
-    res.json({ success: true, id: result.insertId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.patch('/designs/:id', requireAuth, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    const { enabled } = req.body;
-    await pool.execute('UPDATE design_templates SET enabled = ? WHERE id = ?', [enabled ? 1 : 0, req.params.id]);
+    await Contact.findOneAndDelete({ _id: req.params.id, user_id: req.user.id });
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/designs/:id', requireAuth, async (req, res) => {
+// ── Templates CRUD ────────────────────────────────────────────────────────────
+router.get('/templates', requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    await pool.execute('DELETE FROM design_templates WHERE id = ?', [req.params.id]);
+    const templates = await Template.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    res.json(templates);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/templates', requireAuth, async (req, res) => {
+  try {
+    const template = await Template.create({ ...req.body, user_id: req.user.id });
+    res.json(template);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.put('/templates/:id', requireAuth, async (req, res) => {
+  try {
+    const template = await Template.findOneAndUpdate({ _id: req.params.id, user_id: req.user.id }, req.body, { new: true });
+    res.json(template);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.delete('/templates/:id', requireAuth, async (req, res) => {
+  try {
+    await Template.findOneAndDelete({ _id: req.params.id, user_id: req.user.id });
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Auto-Replies CRUD ────────────────────────────────────────────────────────
 router.get('/auto-replies', requireAuth, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM auto_replies WHERE user_id = ? ORDER BY created_at DESC', [req.user.id]);
-    res.json(rows);
+    res.json(await AutoReply.find({ user_id: req.user.id }).sort({ createdAt: -1 }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -160,31 +111,24 @@ router.post('/auto-replies', requireAuth, async (req, res) => {
   try {
     const { keyword, match_type = 'contains', response } = req.body;
     if (!keyword || !response) return res.status(400).json({ error: 'keyword and response required' });
-    const [r] = await pool.execute(
-      'INSERT INTO auto_replies (user_id, keyword, match_type, response) VALUES (?, ?, ?, ?)',
-      [req.user.id, keyword.trim(), match_type, response.trim()]
-    );
-    res.json({ id: r.insertId, keyword, match_type, response, is_active: 1 });
+    const rule = await AutoReply.create({ user_id: req.user.id, keyword: keyword.trim(), match_type, response: response.trim() });
+    res.json(rule);
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Keyword already exists' });
+    if (err.code === 11000) return res.status(400).json({ error: 'Keyword already exists' });
     res.status(500).json({ error: err.message });
   }
 });
 
 router.put('/auto-replies/:id', requireAuth, async (req, res) => {
   try {
-    const { keyword, match_type, response, is_active } = req.body;
-    await pool.execute(
-      'UPDATE auto_replies SET keyword = COALESCE(?, keyword), match_type = COALESCE(?, match_type), response = COALESCE(?, response), is_active = COALESCE(?, is_active) WHERE id = ? AND user_id = ?',
-      [keyword, match_type, response, is_active, req.params.id, req.user.id]
-    );
-    res.json({ success: true });
+    const rule = await AutoReply.findOneAndUpdate({ _id: req.params.id, user_id: req.user.id }, req.body, { new: true });
+    res.json(rule);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.delete('/auto-replies/:id', requireAuth, async (req, res) => {
   try {
-    await pool.execute('DELETE FROM auto_replies WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    await AutoReply.findOneAndDelete({ _id: req.params.id, user_id: req.user.id });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -192,38 +136,27 @@ router.delete('/auto-replies/:id', requireAuth, async (req, res) => {
 // ── Workflows CRUD ───────────────────────────────────────────────────────────
 router.get('/workflows', requireAuth, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM workflows WHERE user_id = ? ORDER BY created_at DESC', [req.user.id]);
-    res.json(rows);
+    res.json(await Workflow.find({ user_id: req.user.id }).sort({ createdAt: -1 }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.post('/workflows', requireAuth, async (req, res) => {
   try {
-    const { name, trigger_type = 'keyword_match', trigger_value, actions = [] } = req.body;
-    if (!name) return res.status(400).json({ error: 'name required' });
-    const [r] = await pool.execute(
-      'INSERT INTO workflows (user_id, name, trigger_type, trigger_value, actions) VALUES (?, ?, ?, ?, ?)',
-      [req.user.id, name, trigger_type, trigger_value || null, JSON.stringify(actions)]
-    );
-    res.json({ id: r.insertId, name, trigger_type, trigger_value, actions, is_active: 1 });
+    const wf = await Workflow.create({ ...req.body, user_id: req.user.id, actions: req.body.actions || [] });
+    res.json(wf);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.put('/workflows/:id', requireAuth, async (req, res) => {
   try {
-    const { name, trigger_type, trigger_value, actions, is_active } = req.body;
-    const actionsJson = actions ? JSON.stringify(actions) : null;
-    await pool.execute(
-      'UPDATE workflows SET name = COALESCE(?, name), trigger_type = COALESCE(?, trigger_type), trigger_value = COALESCE(?, trigger_value), actions = COALESCE(?, actions), is_active = COALESCE(?, is_active) WHERE id = ? AND user_id = ?',
-      [name, trigger_type, trigger_value, actionsJson, is_active, req.params.id, req.user.id]
-    );
-    res.json({ success: true });
+    const wf = await Workflow.findOneAndUpdate({ _id: req.params.id, user_id: req.user.id }, req.body, { new: true });
+    res.json(wf);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.delete('/workflows/:id', requireAuth, async (req, res) => {
   try {
-    await pool.execute('DELETE FROM workflows WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    await Workflow.findOneAndDelete({ _id: req.params.id, user_id: req.user.id });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -231,11 +164,12 @@ router.delete('/workflows/:id', requireAuth, async (req, res) => {
 // ── Businesses ───────────────────────────────────────────────────────────────
 router.post('/businesses', requireAuth, async (req, res) => {
   try {
-    const { name } = req.body;
-    const [existing] = await pool.execute('SELECT id FROM businesses WHERE user_id = ? LIMIT 1', [req.user.id]);
-    if (existing.length) return res.json({ id: existing[0].id });
-    const [r] = await pool.execute('INSERT INTO businesses (user_id, name) VALUES (?, ?)', [req.user.id, name || 'My Business']);
-    res.json({ id: r.insertId });
+    const biz = await Business.findOneAndUpdate(
+      { user_id: req.user.id },
+      { $setOnInsert: { user_id: req.user.id, name: req.body.name || 'My Business' } },
+      { upsert: true, new: true }
+    );
+    res.json({ id: biz._id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -246,22 +180,15 @@ router.post('/whatsapp-accounts', requireAuth, async (req, res) => {
     if (!phone_number_id || !waba_id || !access_token) {
       return res.status(400).json({ error: 'phone_number_id, waba_id, and access_token are required' });
     }
-    // Ensure business exists
-    const [existing] = await pool.execute('SELECT id FROM businesses WHERE user_id = ? LIMIT 1', [req.user.id]);
-    let businessId;
-    if (existing.length) {
-      businessId = existing[0].id;
-    } else {
-      const [r] = await pool.execute('INSERT INTO businesses (user_id, name) VALUES (?, ?)', [req.user.id, 'My Business']);
-      businessId = r.insertId;
-    }
-    await pool.execute(
-      `INSERT INTO whatsapp_accounts (user_id, business_id, phone_number_id, waba_id, access_token, phone_number, verification_status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')
-       ON DUPLICATE KEY UPDATE phone_number_id=VALUES(phone_number_id), waba_id=VALUES(waba_id), access_token=VALUES(access_token), phone_number=VALUES(phone_number)`,
-      [req.user.id, businessId, phone_number_id, waba_id, access_token, phone_number || null]
+    let biz = await Business.findOne({ user_id: req.user.id });
+    if (!biz) biz = await Business.create({ user_id: req.user.id, name: 'My Business' });
+
+    const wa = await WhatsAppAccount.findOneAndUpdate(
+      { user_id: req.user.id },
+      { phone_number_id, waba_id, access_token, phone_number, business_id: biz._id, verification_status: 'pending' },
+      { upsert: true, new: true }
     );
-    res.json({ success: true });
+    res.json({ success: true, id: wa._id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

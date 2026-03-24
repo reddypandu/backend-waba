@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import pool from '../config/db.js';
+import User from '../models/User.js';
 
 export async function requireAuth(req, res, next) {
   try {
@@ -9,17 +9,13 @@ export async function requireAuth(req, res, next) {
     }
     const token = authHeader.replace('Bearer ', '');
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
-    
-    // Check if user exists in MySQL
-    const [rows] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.id]);
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Unauthorized: User not found' });
-    }
-    
-    req.user = rows[0];
+
+    const user = await User.findById(decoded.id).select('-password');
+    if (!user) return res.status(401).json({ error: 'Unauthorized: User not found' });
+
+    req.user = { id: user._id, email: user.email, full_name: user.full_name, role: user.role };
     next();
   } catch (err) {
-    console.error('Auth error:', err);
     return res.status(401).json({ error: 'Unauthorized' });
   }
 }
