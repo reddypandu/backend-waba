@@ -10,9 +10,9 @@ import Campaign from '../models/Campaign.js';
 import Template from '../models/Template.js';
 import Message from '../models/Message.js';
 import User from '../models/User.js';
+import Conversation from '../models/Conversation.js';
 
 const router = Router();
-const Conversation = mongoose.model('Conversation');
 const META_API = 'https://graph.facebook.com/v24.0';
 
 const upload = multer({ storage: multer.memoryStorage() });

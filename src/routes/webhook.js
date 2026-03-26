@@ -6,9 +6,9 @@ import Contact from '../models/Contact.js';
 import Message from '../models/Message.js';
 import Template from '../models/Template.js';
 import { AutoReply } from '../models/Automation.js';
+import Conversation from '../models/Conversation.js';
 
 const router = Router();
-const Conversation = mongoose.model('Conversation');
 const META_API = 'https://graph.facebook.com/v24.0';
 
 // ── GET: Verification ────────────────────────────────────────────────────────

@@ -12,6 +12,16 @@ import otpRoutes from './routes/otp.js';
 import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
 
+// Register Models
+import './models/User.js';
+import './models/Conversation.js';
+import './models/Contact.js';
+import './models/Message.js';
+import './models/Template.js';
+import './models/Campaign.js';
+import './models/WhatsAppAccount.js';
+import './models/Business.js';
+
 // Connect to MongoDB
 connectDB();
 
