@@ -85,6 +85,8 @@ router.post('/', requireAuth, async (req, res) => {
           );
         }
       }
+      // Mark account as verified on successful sync/fetch
+      await WhatsAppAccount.findOneAndUpdate({ user_id: userId }, { verification_status: 'verified' });
       return res.json({ templates: metaTemplates });
     }
 
@@ -145,6 +147,7 @@ router.post('/', requireAuth, async (req, res) => {
         requires_follow_up 
       }).catch(() => {});
 
+      await WhatsAppAccount.findOneAndUpdate({ user_id: userId }, { verification_status: 'verified' });
       return res.json({ success: true, message_id: msgId, conversation_id: conv._id });
     }
 

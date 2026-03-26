@@ -221,7 +221,7 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
     
     // Save to DB for next time
     const metaData = data.data?.[0] || {};
-    await Business.findOneAndUpdate({ user_id: userId }, {
+    await Business.findOneAndUpdate({ user_id: req.user.id }, {
       about: metaData.about || "", 
       address: metaData.address || "", 
       description: metaData.description || "",
@@ -230,6 +230,9 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
       vertical: metaData.vertical || "",
       profile_picture_url: metaData.profile_picture_url || ""
     }, { upsert: true });
+
+    // Mark account as verified
+    await WhatsAppAccount.findOneAndUpdate({ user_id: req.user.id }, { verification_status: 'verified' });
 
     res.json(metaData);
   } catch (err) { res.status(500).json({ error: err.message }); }
