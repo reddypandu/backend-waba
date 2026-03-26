@@ -1,13 +1,14 @@
 import express, { Router } from 'express';
+import mongoose from 'mongoose';
 import crypto from 'crypto';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import Contact from '../models/Contact.js';
-import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
 import Template from '../models/Template.js';
 import { AutoReply } from '../models/Automation.js';
 
 const router = Router();
+const Conversation = mongoose.model('Conversation');
 const META_API = 'https://graph.facebook.com/v24.0';
 
 // ── GET: Verification ────────────────────────────────────────────────────────

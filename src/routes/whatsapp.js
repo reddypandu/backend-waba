@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import Contact from '../models/Contact.js';
@@ -6,9 +7,9 @@ import Campaign from '../models/Campaign.js';
 import Template from '../models/Template.js';
 import Message from '../models/Message.js';
 import User from '../models/User.js';
-import Conversation from '../models/Conversation.js';
 
 const router = Router();
+const Conversation = mongoose.model('Conversation');
 const META_API = 'https://graph.facebook.com/v24.0';
 
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
