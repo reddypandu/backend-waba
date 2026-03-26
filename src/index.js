@@ -25,6 +25,13 @@ import './models/Business.js';
 // Connect to MongoDB
 connectDB();
 
+// Webhook Diagnostic Log
+global.webhookLogs = [];
+const addWebhookLog = (log) => {
+  global.webhookLogs.unshift({ time: new Date(), ...log });
+  if (global.webhookLogs.length > 50) global.webhookLogs.pop();
+};
+
 const app = express();
 
 // ── CORS (Must be at the very top) ───────────────────────────────────────────
@@ -36,7 +43,10 @@ app.use(cors({
 }));
 app.options('*', cors());
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ 
+  limit: '50mb',
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // ── Request Logging ──────────────────────────────────────────────────────────

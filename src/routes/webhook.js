@@ -22,18 +22,24 @@ router.get('/', async (req, res) => {
 });
 
 // ── POST: Inbound events ─────────────────────────────────────────────────────
-router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/', async (req, res) => {
   res.json({ success: true });
 
   try {
-    const rawBody = req.body.toString();
+    // If index.js used express.json(), it's in req.body. 
+    // We need the raw buffer for signature verification if present.
+    const body = req.body;
+    const rawBody = req.rawBody || JSON.stringify(body);
     const sig = req.headers['x-hub-signature-256'];
+
     if (process.env.META_APP_SECRET && sig) {
       const expected = 'sha256=' + crypto.createHmac('sha256', process.env.META_APP_SECRET).update(rawBody).digest('hex');
-      if (expected !== sig) return;
+      if (expected !== sig) {
+        console.warn('[Webhook] Signature mismatch');
+        return;
+      }
     }
 
-    const body = JSON.parse(rawBody);
     if (body.object !== 'whatsapp_business_account') return;
 
     for (const entry of body.entry) {
@@ -43,7 +49,12 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
         const metadata = value.metadata;
         const phoneNumberId = metadata?.phone_number_id;
 
-        console.log(`[Webhook] Event: ${change.field}, WABA: ${wabaId}, PNID: ${phoneNumberId}`);
+        const logMsg = `[Webhook] Event: ${change.field}, WABA: ${wabaId}, PNID: ${phoneNumberId}`;
+        console.log(logMsg);
+        if (global.webhookLogs) {
+          global.webhookLogs.unshift({ time: new Date(), msg: logMsg, body: change.value });
+          if (global.webhookLogs.length > 50) global.webhookLogs.pop();
+        }
 
         // Mark as verified if we find an account
         if (phoneNumberId || wabaId) {
