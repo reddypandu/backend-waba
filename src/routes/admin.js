@@ -195,17 +195,43 @@ router.post('/whatsapp-accounts', requireAuth, async (req, res) => {
 // ── Meta Business Profile ──────────────────────────────────────────────────
 router.get('/whatsapp-profile', requireAuth, async (req, res) => {
   try {
+    const forceSync = req.query.sync === 'true';
+    if (!forceSync) {
+      const biz = await Business.findOne({ user_id: req.user.id });
+      if (biz && (biz.about || biz.description || biz.email || biz.address)) {
+        // Return cached from local DB
+        return res.json({ 
+          about: biz.about, address: biz.address, description: biz.description, 
+          email: biz.email, websites: biz.websites, vertical: biz.vertical, 
+          profile_picture_url: biz.profile_picture_url,
+          name: biz.name
+        });
+      }
+    }
+
     const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
-    if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
+    if (!wa || !wa.phone_number_id) return res.json({}); // Default empty if not set up
     
     // Fetch profile from Meta
     const r = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`, {
       headers: { Authorization: `Bearer ${wa.access_token}` }
     });
     const data = await r.json();
-    if (!r.ok) throw new Error(data.error?.message || 'Meta API error');
+    if (!r.ok) return res.json({}); // Default empty if Meta errors
     
-    res.json(data.data?.[0] || {});
+    // Save to DB for next time
+    const metaData = data.data?.[0] || {};
+    await Business.findOneAndUpdate({ user_id: userId }, {
+      about: metaData.about || "", 
+      address: metaData.address || "", 
+      description: metaData.description || "",
+      email: metaData.email || "", 
+      websites: metaData.websites || [], 
+      vertical: metaData.vertical || "",
+      profile_picture_url: metaData.profile_picture_url || ""
+    }, { upsert: true });
+
+    res.json(metaData);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -227,6 +253,13 @@ router.post('/whatsapp-profile', requireAuth, async (req, res) => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error?.message || 'Meta API error');
+
+    // Save to DB locally
+    await Business.findOneAndUpdate(
+      { user_id: req.user.id },
+      { about, address, description, email, websites, vertical },
+      { upsert: true }
+    );
 
     res.json({ success: true, data });
   } catch (err) { res.status(500).json({ error: err.message }); }

@@ -68,7 +68,13 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
         if (value.statuses) {
           for (const s of value.statuses) {
-            await Message.findOneAndUpdate({ whatsapp_message_id: s.id }, { status: s.status });
+            const updatedMsg = await Message.findOneAndUpdate({ whatsapp_message_id: s.id }, { status: s.status });
+            
+            // Automated Follow-up Logic (from sample app): If message was flagged for follow-up and was delivered/read
+            if (updatedMsg && updatedMsg.requires_follow_up && (s.status === 'delivered' || s.status === 'read')) {
+              await sendFollowUpMessage(updatedMsg, phoneNumberId, wabaId).catch(console.error);
+              await Message.findByIdAndUpdate(updatedMsg._id, { requires_follow_up: false });
+            }
           }
         }
 
@@ -91,10 +97,25 @@ async function processMessage(msg, value, phoneNumberId, wabaId) {
   const contactName = value.contacts?.[0]?.profile?.name || from;
 
   let content = null, messageType = msg.type;
+  let interactiveReplyId = null;
+  
   if (msg.type === 'text') content = msg.text?.body;
   else if (msg.type === 'image') content = msg.image?.caption || '[Image]';
   else if (msg.type === 'video') content = msg.video?.caption || '[Video]';
   else if (msg.type === 'document') content = msg.document?.filename || '[Document]';
+  else if (msg.type === 'interactive') {
+    if (msg.interactive?.type === 'button_reply') {
+      content = msg.interactive.button_reply.title;
+      interactiveReplyId = msg.interactive.button_reply.id;
+    } else if (msg.interactive?.type === 'list_reply') {
+      content = msg.interactive.list_reply.title;
+      interactiveReplyId = msg.interactive.list_reply.id;
+    } else {
+      content = '[Interactive]';
+    }
+  } else if (msg.type === 'button') {
+    content = msg.button?.text || '[Button]';
+  }
 
   // Find account by either ID
   const waAccount = await WhatsAppAccount.findOne({
@@ -124,6 +145,7 @@ async function processMessage(msg, value, phoneNumberId, wabaId) {
       user_id: userId, conversation_id: conversation._id, contact_id: contact._id,
       direction: 'inbound', message_type: messageType, content, phone_number: from,
       whatsapp_message_id: msg.id, status: 'delivered',
+      interactive_reply_id: interactiveReplyId,
     });
   } catch (e) { if (e.code !== 11000) throw e; }
 
@@ -158,6 +180,29 @@ async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, conv
     direction: 'outbound', message_type: 'text', content: `[Auto-Reply] ${matched.response}`,
     whatsapp_message_id: data.messages?.[0]?.id, status: 'sent',
   }).catch(() => {});
+}
+
+async function sendFollowUpMessage(msg, phoneNumberId, wabaId) {
+  const waAccount = await WhatsAppAccount.findOne({
+    $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }]
+  });
+  if (!waAccount) return;
+  
+  const text = "Thanks for checking out our message! Would you like to try another demo?";
+  
+  const r = await fetch(`${META_API}/${phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messaging_product: 'whatsapp', to: msg.phone_number, type: 'text', text: { body: text } }),
+  });
+  const data = await r.json();
+  if (r.ok) {
+    await Message.create({
+      user_id: waAccount.user_id, conversation_id: msg.conversation_id, contact_id: msg.contact_id,
+      direction: 'outbound', message_type: 'text', content: `[Follow-up] ${text}`,
+      whatsapp_message_id: data.messages?.[0]?.id, status: 'sent',
+    }).catch(() => {});
+  }
 }
 
 export default router;

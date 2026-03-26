@@ -20,6 +20,8 @@ const CampaignSchema = new mongoose.Schema({
   scheduled_at: { type: Date },
   total_contacts: { type: Number, default: 0 },
   contact_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Contact' }],
+  requires_follow_up: { type: Boolean, default: false },
+  interactive_params: { type: mongoose.Schema.Types.Mixed }, // to store things like imageLink, offerCode
   sent_count: { type: Number, default: 0 },
   delivered_count: { type: Number, default: 0 },
   read_count: { type: Number, default: 0 },

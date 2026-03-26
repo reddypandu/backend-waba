@@ -6,6 +6,7 @@ import Campaign from '../models/Campaign.js';
 import Template from '../models/Template.js';
 import Message from '../models/Message.js';
 import User from '../models/User.js';
+import Conversation from '../models/Conversation.js';
 
 const router = Router();
 const META_API = 'https://graph.facebook.com/v24.0';
@@ -61,7 +62,7 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     if (action === 'send_template') {
-      const { to, template_name, template_language = 'en', components } = params;
+      const { to, template_name, template_language = 'en', components, requires_follow_up = false } = params;
       const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
@@ -74,8 +75,34 @@ router.post('/', requireAuth, async (req, res) => {
       const data = await r.json();
       if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Failed to send message' });
       const msgId = data.messages?.[0]?.id;
-      await Message.create({ user_id: userId, direction: 'outbound', message_type: 'template', template_name, phone_number: to, whatsapp_message_id: msgId, status: 'sent' }).catch(() => {});
-      return res.json({ success: true, message_id: msgId });
+      
+      // Ensure contact & conversation exist
+      const contact = await Contact.findOneAndUpdate(
+        { user_id: userId, phone_number: to },
+        { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
+        { upsert: true, new: true }
+      );
+      
+      const conv = await Conversation.findOneAndUpdate(
+        { user_id: userId, contact_id: contact._id, phone_number: to },
+        { $set: { last_message: `[Template: ${template_name}]`, last_message_at: new Date() } },
+        { upsert: true, new: true }
+      );
+
+      await Message.create({ 
+        user_id: userId, 
+        conversation_id: conv._id,
+        contact_id: contact._id,
+        direction: 'outbound', 
+        message_type: 'template', 
+        template_name, 
+        phone_number: to, 
+        whatsapp_message_id: msgId, 
+        status: 'sent', 
+        requires_follow_up 
+      }).catch(() => {});
+
+      return res.json({ success: true, message_id: msgId, conversation_id: conv._id });
     }
 
     if (action === 'get_contacts') {
@@ -193,7 +220,7 @@ router.get('/campaigns/:id', requireAuth, async (req, res) => {
 
 router.post('/campaigns', requireAuth, async (req, res) => {
   try {
-    const { name, template_name, audience_type = 'existing', schedule_type = 'now', scheduled_at, contacts = [] } = req.body;
+    const { name, template_name, audience_type = 'existing', schedule_type = 'now', scheduled_at, contacts = [], requires_follow_up = false, interactive_params = null } = req.body;
     if (!name) return res.status(400).json({ error: 'Campaign name required' });
 
     let campaignContactIds = [];
@@ -214,6 +241,8 @@ router.post('/campaigns', requireAuth, async (req, res) => {
       total_contacts: campaignContactIds.length,
       contact_ids: campaignContactIds, // Assuming we added this to model if not already exists
       status: schedule_type === 'scheduled' ? 'scheduled' : 'draft',
+      requires_follow_up,
+      interactive_params,
     });
 
     res.json({ success: true, campaign_id: campaign._id });
@@ -235,8 +264,32 @@ router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
 
     // Fire and forget (or use a background worker if available)
     (async () => {
-      const { template_name, contact_ids } = campaign;
+      const { template_name, contact_ids, requires_follow_up, interactive_params } = campaign;
       const contacts = await Contact.find({ _id: { $in: contact_ids } });
+      
+      let components = [];
+      if (interactive_params) {
+        if (interactive_params.header_image_url) {
+          components.push({
+            type: "header",
+            parameters: [{ type: "image", image: { link: interactive_params.header_image_url } }]
+          });
+        }
+        if (interactive_params.offer_code) {
+          // LTO expiration 48 hrs from now
+          const futureTime = new Date(new Date().getTime() + (48 * 60 * 60 * 1000));
+          components.push({
+            type: "limited_time_offer",
+            parameters: [{ type: "limited_time_offer", limited_time_offer: { expiration_time_ms: futureTime.getTime() } }]
+          });
+          components.push({
+            type: "button",
+            sub_type: "copy_code",
+            index: 0,
+            parameters: [{ type: "coupon_code", coupon_code: interactive_params.offer_code }]
+          });
+        }
+      }
       
       let sent = 0, failed = 0;
       for (const contact of contacts) {
@@ -248,7 +301,11 @@ router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
               messaging_product: 'whatsapp',
               to: contact.phone_number,
               type: 'template',
-              template: { name: template_name, language: { code: 'en' } } 
+              template: { 
+                 name: template_name, 
+                 language: { code: 'en' },
+                 ...(components.length > 0 && { components })
+              } 
             }),
           });
           const data = await r.json();
@@ -266,7 +323,8 @@ router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
               template_name,
               phone_number: contact.phone_number,
               whatsapp_message_id: msgId,
-              status: 'sent'
+              status: 'sent',
+              requires_follow_up
             });
           } else {
             failed++;
