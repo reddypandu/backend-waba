@@ -217,25 +217,41 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
       headers: { Authorization: `Bearer ${wa.access_token}` }
     });
     const data = await r.json();
-    if (!r.ok) return res.json({}); // Default empty if Meta errors
+    console.log('[Meta Profile Fetch] Status:', r.status, 'Payload:', JSON.stringify(data));
     
-    // Save to DB for next time
-    const metaData = data.data?.[0] || {};
-    await Business.findOneAndUpdate({ user_id: req.user.id }, {
-      about: metaData.about || "", 
-      address: metaData.address || "", 
-      description: metaData.description || "",
-      email: metaData.email || "", 
-      websites: metaData.websites || [], 
-      vertical: metaData.vertical || "",
-      profile_picture_url: metaData.profile_picture_url || ""
-    }, { upsert: true });
+    if (!r.ok) {
+      console.error('Meta Profile Sync Error:', data.error);
+      if (forceSync) {
+        return res.status(400).json({ error: data.error?.message || 'Meta API error' });
+      }
+      return res.json({});
+    }
 
-    // Mark account as verified
-    await WhatsAppAccount.findOneAndUpdate({ user_id: req.user.id }, { verification_status: 'verified' });
+    // Resilience: Meta sometimes returns { data: [...] } and sometimes the object directly
+    const metaData = Array.isArray(data.data) ? data.data[0] : (data.about || data.email || data.websites ? data : {});
+    
+    if (Object.keys(metaData).length > 0) {
+      // Save to DB
+      await Business.findOneAndUpdate({ user_id: req.user.id }, {
+        about: metaData.about || "", 
+        address: metaData.address || "", 
+        description: metaData.description || "",
+        email: metaData.email || "", 
+        websites: metaData.websites || [], 
+        vertical: metaData.vertical || "",
+        profile_picture_url: metaData.profile_picture_url || ""
+      }, { upsert: true });
+
+      // Mark account as verified
+      await WhatsAppAccount.findOneAndUpdate({ user_id: req.user.id }, { verification_status: 'verified' });
+      console.log(`[Meta Profile Fetch] Account ${wa.phone_number_id} marked as verified.`);
+    }
 
     res.json(metaData);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error('[Meta Profile Fetch] Critical Error:', err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 router.post('/whatsapp-profile', requireAuth, async (req, res) => {
