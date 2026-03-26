@@ -1,4 +1,7 @@
 import { Router } from 'express';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
 import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
@@ -11,6 +14,45 @@ import User from '../models/User.js';
 const router = Router();
 const Conversation = mongoose.model('Conversation');
 const META_API = 'https://graph.facebook.com/v24.0';
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+// ── Media Upload (Local + Meta Handle) ────────────────────────────────────────
+router.post('/upload_media', requireAuth, upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file provided' });
+    
+    // Save locally
+    const assetPath = path.resolve('..', 'frontend-waba', 'src', 'assets', 'templates');
+    if (!fs.existsSync(assetPath)) fs.mkdirSync(assetPath, { recursive: true });
+    const filename = `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`;
+    fs.writeFileSync(path.join(assetPath, filename), file.buffer);
+
+    // Get Meta Handle
+    const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
+    if (!waAccount) return res.status(400).json({ error: 'WhatsApp account not linked' });
+    
+    const appId = process.env.META_APP_ID;
+    const sessRes = await fetch(`${META_API}/${appId}/uploads?file_length=${file.size}&file_type=${file.mimetype}&access_token=${waAccount.access_token}`, {
+      method: 'POST'
+    });
+    const sessData = await sessRes.json();
+    if (sessData.error) throw new Error(sessData.error.message);
+
+    const upRes = await fetch(`${META_API}/${sessData.id}`, {
+      method: 'POST',
+      headers: { 'Authorization': `OAuth ${waAccount.access_token}`, 'file_offset': '0' },
+      body: file.buffer
+    });
+    const upData = await upRes.json();
+    if (upData.error) throw new Error(upData.error.message);
+
+    res.json({ success: true, handle: upData.h, localPath: `/src/assets/templates/${filename}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
