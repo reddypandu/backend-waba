@@ -240,6 +240,13 @@ router.get('/messages/:convId', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.get('/templates/all', requireAuth, async (req, res) => {
+  try {
+    const templates = await Template.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    res.json({ templates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/templates/:id', requireAuth, async (req, res) => {
   try {
     const template = await Template.findOne({ _id: req.params.id, user_id: req.user.id });
@@ -270,7 +277,7 @@ router.post('/campaigns', requireAuth, async (req, res) => {
     if (!name) return res.status(400).json({ error: 'Campaign name required' });
 
     let campaignContactIds = [];
-    if (audience_type === 'existing' && contacts?.length > 0) {
+    if (contacts && contacts.length > 0) {
       campaignContactIds = contacts;
     } else if (audience_type === 'existing') {
       const allContacts = await Contact.find({ user_id: req.user.id });
@@ -481,12 +488,7 @@ router.get('/messages-by-campaign/:id', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.get('/templates/all', requireAuth, async (req, res) => {
-  try {
-    const templates = await Template.find({ user_id: req.user.id }).sort({ createdAt: -1 });
-    res.json({ templates });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+
 
 router.post('/contacts/batch', requireAuth, async (req, res) => {
   try {

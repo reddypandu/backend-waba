@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { requireAuth } from '../middleware/auth.js';
 import User from '../models/User.js';
 import Business from '../models/Business.js';
@@ -10,6 +11,7 @@ import { AutoReply, Workflow } from '../models/Automation.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
 // ── /me — Full dashboard data ─────────────────────────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
@@ -247,6 +249,9 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
       console.log(`[Meta Profile Fetch] Account ${wa.phone_number_id} marked as verified.`);
     }
 
+    const biz = await Business.findOne({ user_id: req.user.id });
+    if (biz) { metaData.name = biz.name; }
+
     res.json(metaData);
   } catch (err) { 
     console.error('[Meta Profile Fetch] Critical Error:', err);
@@ -284,13 +289,66 @@ router.post('/whatsapp-profile', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/whatsapp-profile-picture', requireAuth, async (req, res) => {
+router.post('/whatsapp-profile-picture', requireAuth, upload.single('file'), async (req, res) => {
   try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file provided' });
+    
     const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
+
+    const appId = process.env.META_APP_ID;
     
-    // To implement real upload, we need multer in express.
-    res.status(501).json({ error: 'Logo upload is currently managed via Meta Dashboard. Direct upload coming soon.' });
+    const sessRes = await fetch(`https://graph.facebook.com/v24.0/${appId}/uploads?file_length=${file.size}&file_type=${file.mimetype}&access_token=${wa.access_token}`, {
+      method: 'POST'
+    });
+    const sessData = await sessRes.json();
+    if (sessData.error) throw new Error(sessData.error.message);
+
+    const upRes = await fetch(`https://graph.facebook.com/v24.0/${sessData.id}`, {
+      method: 'POST',
+      headers: { 'Authorization': `OAuth ${wa.access_token}`, 'file_offset': '0' },
+      body: file.buffer
+    });
+    const upData = await upRes.json();
+    if (upData.error) throw new Error(upData.error.message);
+
+    const setRes = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile`, {
+      method: 'POST',
+      headers: { 
+        Authorization: `Bearer ${wa.access_token}`,
+        'Content-Type': 'application/json' 
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        profile_picture_handle: upData.h
+      })
+    });
+    
+    const setData = await setRes.json();
+    if (!setRes.ok) throw new Error(setData.error?.message || 'Meta API error setting profile picture');
+
+    // Save locally for UI to display (since Meta often omits it on sync)
+    const fs = await import('fs');
+    const path = await import('path');
+    const assetPath = path.resolve('..', 'frontend-waba', 'public', 'uploads');
+    if (!fs.existsSync(assetPath)) fs.mkdirSync(assetPath, { recursive: true });
+    
+    const ext = file.mimetype === 'image/jpeg' ? '.jpg' : '.png';
+    const filename = `profile_${wa.phone_number_id}_${Date.now()}${ext}`;
+    fs.writeFileSync(path.join(assetPath, filename), file.buffer);
+    
+    const localUrl = `/uploads/${filename}`;
+    
+    // Update local DB instantly
+    await Business.findOneAndUpdate(
+      { user_id: req.user.id },
+      { profile_picture_url: localUrl },
+      { upsert: true }
+    );
+
+    // Return the new data or a success flag
+    res.json({ success: true, message: 'Profile picture updated successfully', profile_picture_url: localUrl });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

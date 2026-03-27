@@ -2,9 +2,52 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import Otp from '../models/Otp.js';
+import { sendOtpEmail } from '../utils/mailer.js';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+
+// ── OTP Handlers ──────────────────────────────────────────────────────────────
+router.post('/send-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const exists = await User.findOne({ email });
+    if (exists) return res.status(400).json({ error: 'Email is already registered' });
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await Otp.findOneAndUpdate(
+      { email },
+      { email, otp, createdAt: new Date() },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const sent = await sendOtpEmail(email, otp);
+    if (!sent) return res.status(500).json({ error: 'Failed to send OTP email. Please check SMTP settings.' });
+
+    res.json({ success: true, message: 'OTP sent successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: 'Email and OTP required' });
+
+    const record = await Otp.findOne({ email, otp });
+    if (!record) return res.status(400).json({ error: 'Invalid or expired OTP' });
+
+    await Otp.deleteOne({ _id: record._id });
+    res.json({ success: true, message: 'OTP verified successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Signup ───────────────────────────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
