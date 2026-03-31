@@ -39,6 +39,72 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Admin: Global Users ──────────────────────────────────────────────────
+router.get('/users', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: Requires admin privileges' });
+    }
+    const users = await User.find().select('-password').sort({ createdAt: -1 });
+
+    const usersWithWA = await Promise.all(users.map(async u => {
+      const wa = await WhatsAppAccount.findOne({ user_id: u._id });
+      return {
+        ...u.toObject(),
+        wa_connected: !!wa?.phone_number_id,
+        wa_phone: wa?.phone_number || ''
+      };
+    }));
+
+    const stats = {
+      total_users: users.length,
+      total_free: users.filter(u => u.subscription?.plan === 'free').length,
+      total_starter: users.filter(u => u.subscription?.plan === 'starter').length,
+      total_pro: users.filter(u => u.subscription?.plan === 'pro').length,
+    };
+
+    res.json({ users: usersWithWA, stats });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Admin: Single User Detail ────────────────────────────────────────────
+router.get('/users/:id', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
+    const targetUserId = req.params.id;
+    const user = await User.findById(targetUserId).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const waAccount = await WhatsAppAccount.findOne({ user_id: targetUserId });
+    const business = await Business.findOne({ user_id: targetUserId });
+    const [contactCount, campaignCount, templateCount] = await Promise.all([
+      Contact.countDocuments({ user_id: targetUserId }),
+      Campaign.countDocuments({ user_id: targetUserId }),
+      Template.countDocuments({ user_id: targetUserId }),
+    ]);
+    const transactions = await WalletTransaction.find({ user_id: targetUserId }).sort({ createdAt: -1 }).limit(10);
+
+    res.json({
+      user,
+      waAccount,
+      business,
+      stats: { contacts: contactCount, campaigns: campaignCount, templates: templateCount },
+      transactions
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Admin: Global Designs ────────────────────────────────────────────────
+router.get('/designs', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: Requires admin privileges' });
+    }
+    const designs = await Design.find().sort({ createdAt: -1 }).populate('user_id', 'full_name email');
+    res.json(designs);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── Contacts CRUD ─────────────────────────────────────────────────────────────
 router.get('/contacts', requireAuth, async (req, res) => {
   try {
@@ -202,9 +268,9 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
       const biz = await Business.findOne({ user_id: req.user.id });
       if (biz && (biz.about || biz.description || biz.email || biz.address)) {
         // Return cached from local DB
-        return res.json({ 
-          about: biz.about, address: biz.address, description: biz.description, 
-          email: biz.email, websites: biz.websites, vertical: biz.vertical, 
+        return res.json({
+          about: biz.about, address: biz.address, description: biz.description,
+          email: biz.email, websites: biz.websites, vertical: biz.vertical,
           profile_picture_url: biz.profile_picture_url,
           name: biz.name
         });
@@ -213,14 +279,14 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
 
     const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!wa || !wa.phone_number_id) return res.json({}); // Default empty if not set up
-    
+
     // Fetch profile from Meta
     const r = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`, {
       headers: { Authorization: `Bearer ${wa.access_token}` }
     });
     const data = await r.json();
     console.log('[Meta Profile Fetch] Status:', r.status, 'Payload:', JSON.stringify(data));
-    
+
     if (!r.ok) {
       console.error('Meta Profile Sync Error:', data.error);
       if (forceSync) {
@@ -231,15 +297,15 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
 
     // Resilience: Meta sometimes returns { data: [...] } and sometimes the object directly
     const metaData = Array.isArray(data.data) ? data.data[0] : (data.about || data.email || data.websites ? data : {});
-    
+
     if (Object.keys(metaData).length > 0) {
       // Save to DB
       await Business.findOneAndUpdate({ user_id: req.user.id }, {
-        about: metaData.about || "", 
-        address: metaData.address || "", 
+        about: metaData.about || "",
+        address: metaData.address || "",
         description: metaData.description || "",
-        email: metaData.email || "", 
-        websites: metaData.websites || [], 
+        email: metaData.email || "",
+        websites: metaData.websites || [],
         vertical: metaData.vertical || "",
         profile_picture_url: metaData.profile_picture_url || ""
       }, { upsert: true });
@@ -253,9 +319,9 @@ router.get('/whatsapp-profile', requireAuth, async (req, res) => {
     if (biz) { metaData.name = biz.name; }
 
     res.json(metaData);
-  } catch (err) { 
+  } catch (err) {
     console.error('[Meta Profile Fetch] Critical Error:', err);
-    res.status(500).json({ error: err.message }); 
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -265,13 +331,13 @@ router.post('/whatsapp-profile', requireAuth, async (req, res) => {
     if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
 
     const { about, address, description, email, websites, vertical } = req.body;
-    
+
     // Update Meta Profile
     const r = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile`, {
       method: 'POST',
-      headers: { 
+      headers: {
         Authorization: `Bearer ${wa.access_token}`,
-        'Content-Type': 'application/json' 
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({ messaging_product: 'whatsapp', about, address, description, email, websites, vertical })
     });
@@ -293,12 +359,12 @@ router.post('/whatsapp-profile-picture', requireAuth, upload.single('file'), asy
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file provided' });
-    
+
     const wa = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!wa || !wa.phone_number_id) return res.status(404).json({ error: 'WhatsApp not configured' });
 
     const appId = process.env.META_APP_ID;
-    
+
     const sessRes = await fetch(`https://graph.facebook.com/v24.0/${appId}/uploads?file_length=${file.size}&file_type=${file.mimetype}&access_token=${wa.access_token}`, {
       method: 'POST'
     });
@@ -315,16 +381,16 @@ router.post('/whatsapp-profile-picture', requireAuth, upload.single('file'), asy
 
     const setRes = await fetch(`https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile`, {
       method: 'POST',
-      headers: { 
+      headers: {
         Authorization: `Bearer ${wa.access_token}`,
-        'Content-Type': 'application/json' 
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         messaging_product: 'whatsapp',
         profile_picture_handle: upData.h
       })
     });
-    
+
     const setData = await setRes.json();
     if (!setRes.ok) throw new Error(setData.error?.message || 'Meta API error setting profile picture');
 
@@ -333,13 +399,13 @@ router.post('/whatsapp-profile-picture', requireAuth, upload.single('file'), asy
     const path = await import('path');
     const assetPath = path.resolve('..', 'frontend-waba', 'public', 'uploads');
     if (!fs.existsSync(assetPath)) fs.mkdirSync(assetPath, { recursive: true });
-    
+
     const ext = file.mimetype === 'image/jpeg' ? '.jpg' : '.png';
     const filename = `profile_${wa.phone_number_id}_${Date.now()}${ext}`;
     fs.writeFileSync(path.join(assetPath, filename), file.buffer);
-    
+
     const localUrl = `/uploads/${filename}`;
-    
+
     // Update local DB instantly
     await Business.findOneAndUpdate(
       { user_id: req.user.id },
