@@ -39,12 +39,15 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Create a new design
 router.post('/', requireAuth, async (req, res) => {
     try {
-        const { name, data, type, category, thumbnail_url } = req.body;
+        const { name, data, type, is_public, category, thumbnail_url } = req.body;
+        const isAdmin = req.user.role === 'admin';
+
         const design = await Design.create({
             user_id: req.user.id,
             name,
             data,
-            type: type || 'user',
+            type: isAdmin && type === 'template' ? 'template' : 'user',
+            is_public: isAdmin ? !!is_public : false,
             category,
             thumbnail_url
         });
@@ -57,10 +60,18 @@ router.post('/', requireAuth, async (req, res) => {
 // Update a design
 router.put('/:id', requireAuth, async (req, res) => {
     try {
-        const { name, data, category, thumbnail_url } = req.body;
+        const { name, data, type, is_public, category, thumbnail_url } = req.body;
+        const isAdmin = req.user.role === 'admin';
+
+        const updateData = { name, data, category, thumbnail_url };
+        if (isAdmin) {
+            if (type !== undefined) updateData.type = type;
+            if (is_public !== undefined) updateData.is_public = is_public;
+        }
+
         const design = await Design.findOneAndUpdate(
             { _id: req.params.id, user_id: req.user.id },
-            { name, data, category, thumbnail_url },
+            updateData,
             { new: true }
         );
         if (!design) return res.status(404).json({ error: 'Design not found or unauthorized' });
