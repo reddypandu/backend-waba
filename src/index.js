@@ -11,6 +11,8 @@ import cloudinaryRoutes from './routes/cloudinary.js';
 import otpRoutes from './routes/otp.js';
 import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
+import designRoutes from './routes/designs.js';
+import uploadPersistRoutes from './routes/uploads.js';
 
 // Register Models
 import './models/User.js';
@@ -21,6 +23,8 @@ import './models/Template.js';
 import './models/Campaign.js';
 import './models/WhatsAppAccount.js';
 import './models/Business.js';
+import './models/Design.js';
+import './models/Upload.js';
 
 // Connect to MongoDB
 connectDB();
@@ -35,15 +39,15 @@ const addWebhookLog = (log) => {
 const app = express();
 
 // ── CORS (Must be at the very top) ───────────────────────────────────────────
-app.use(cors({ 
-  origin: (origin, callback) => callback(null, true), 
+app.use(cors({
+  origin: (origin, callback) => callback(null, true),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 app.options('*', cors());
 
-app.use(express.json({ 
+app.use(express.json({
   limit: '50mb',
   verify: (req, res, buf) => { req.rawBody = buf; }
 }));
@@ -77,6 +81,8 @@ app.use('/api/razorpay', razorpayRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/upload', cloudinaryRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/designs', designRoutes);
+app.use('/api/uploads-persist', uploadPersistRoutes);
 
 app.get('/', (req, res) => res.json({ message: 'Backend API is running', version: '2.0.0', db: 'MongoDB' }));
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
