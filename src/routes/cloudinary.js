@@ -19,7 +19,7 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
     if (!CLOUD_NAME || !API_KEY || !API_SECRET) throw new Error('Cloudinary not configured');
 
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const folder = 'whatsapp-templates';
+    const folder = `user-${req.user.id}/whatsapp-templates`;
     const signature = crypto
       .createHash('sha1')
       .update(`folder=${folder}&timestamp=${timestamp}${API_SECRET}`)

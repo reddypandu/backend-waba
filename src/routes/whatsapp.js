@@ -431,7 +431,12 @@ router.get('/campaigns/:id/stats', requireAuth, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const stats = await Message.aggregate([
-      { $match: { campaign_id: new mongoose.Types.ObjectId(campaignId) } },
+      { 
+        $match: { 
+          campaign_id: new mongoose.Types.ObjectId(campaignId),
+          user_id: new mongoose.Types.ObjectId(req.user.id)
+        } 
+      },
       { $group: { _id: '$status', count: { $sum: 1 } } }
     ]);
 
