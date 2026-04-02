@@ -1,24 +1,15 @@
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const transporter = nodemailer.createTransport({
-  pool: true, // Reuse SMTP connections
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_PORT === '465', // true for 465, false for other ports
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 export const sendOtpEmail = async (to, otp) => {
   try {
-    const mailOptions = {
-      from: `"Yestick Ai Auth" <${process.env.SMTP_USER}>`,
-      to,
+    const { data, error } = await resend.emails.send({
+      from: 'Yestick Ai Auth <verify@yestickai.com>', // Change after adding your domain in Resend dashboard
+      to: [to],
       subject: 'Your Yestick Ai Verification Code',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eeeeee; border-radius: 10px;">
@@ -30,10 +21,14 @@ export const sendOtpEmail = async (to, otp) => {
           <p style="color: #999999; font-size: 14px; text-align: center;">This code will expire in 5 minutes.</p>
         </div>
       `,
-    };
+    });
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('OTP Email sent: %s', info.messageId);
+    if (error) {
+      console.error('Error sending OTP Email:', error);
+      return false;
+    }
+
+    console.log('OTP Email sent successfully. ID:', data.id);
     return true;
   } catch (error) {
     console.error('Error sending OTP Email:', error);
