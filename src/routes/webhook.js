@@ -32,15 +32,21 @@ router.post('/', async (req, res) => {
     const rawBody = req.rawBody || JSON.stringify(body);
     const sig = req.headers['x-hub-signature-256'];
 
+    console.log('[Webhook] Received POST request:', JSON.stringify(body, null, 2));
+
     if (process.env.META_APP_SECRET && sig) {
       const expected = 'sha256=' + crypto.createHmac('sha256', process.env.META_APP_SECRET).update(rawBody).digest('hex');
       if (expected !== sig) {
-        console.warn('[Webhook] Signature mismatch');
+        console.warn('[Webhook] Signature mismatch! Expected:', expected, 'Received:', sig);
         return;
       }
+      console.log('[Webhook] Signature verified.');
     }
 
-    if (body.object !== 'whatsapp_business_account') return;
+    if (body.object !== 'whatsapp_business_account') {
+      console.warn('[Webhook] Object is not whatsapp_business_account:', body.object);
+      return;
+    }
 
     for (const entry of body.entry) {
       const wabaId = entry.id;
@@ -49,19 +55,26 @@ router.post('/', async (req, res) => {
         const metadata = value.metadata;
         const phoneNumberId = metadata?.phone_number_id;
 
-        const logMsg = `[Webhook] Event: ${change.field}, WABA: ${wabaId}, PNID: ${phoneNumberId}`;
-        console.log(logMsg);
+        console.log(`[Webhook] Event: ${change.field}, WABA ID: ${wabaId}, Phone Num ID: ${phoneNumberId}`);
+        
         if (global.webhookLogs) {
-          global.webhookLogs.unshift({ time: new Date(), msg: logMsg, body: change.value });
+          global.webhookLogs.unshift({ time: new Date(), msg: `Event: ${change.field}, PNID: ${phoneNumberId}`, body: change.value });
           if (global.webhookLogs.length > 50) global.webhookLogs.pop();
         }
 
         // Mark as verified if we find an account
         if (phoneNumberId || wabaId) {
-          await WhatsAppAccount.findOneAndUpdate(
+          const matchedAccount = await WhatsAppAccount.findOneAndUpdate(
             { $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }] }, 
-            { webhook_verified: true }
-          ).catch(() => {});
+            { webhook_verified: true },
+            { sort: { updatedAt: -1 }, returnDocument: 'after' }
+          ).catch((e) => console.error('[Webhook] DB Error finding account:', e.message));
+          
+          if (matchedAccount) {
+            console.log('[Webhook] Matched Account found for user:', matchedAccount.user_id);
+          } else {
+            console.warn('[Webhook] No account found in DB for PNID:', phoneNumberId, 'or WABA:', wabaId);
+          }
         }
 
         // 1. Template Status Updates
@@ -129,10 +142,10 @@ async function processMessage(msg, value, phoneNumberId, wabaId) {
     content = msg.button?.text || '[Button]';
   }
 
-  // Find account by either ID
+  // Find account by either ID, picking the most recently updated one first
   const waAccount = await WhatsAppAccount.findOne({
     $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }]
-  });
+  }).sort({ updatedAt: -1 });
   
   if (!waAccount) {
     console.error(`[Webhook] Account not found for PNID: ${phoneNumberId}, WABA: ${wabaId}`);
@@ -143,13 +156,13 @@ async function processMessage(msg, value, phoneNumberId, wabaId) {
   const contact = await Contact.findOneAndUpdate(
     { user_id: userId, phone_number: from },
     { $setOnInsert: { user_id: userId, phone_number: from, name: contactName } },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   const conversation = await Conversation.findOneAndUpdate(
     { user_id: userId, contact_id: contact._id },
     { $set: { phone_number: from, last_message: content, last_message_at: new Date(), status: 'open' }, $inc: { unread_count: 1 } },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   try {

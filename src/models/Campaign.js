@@ -21,7 +21,8 @@ const CampaignSchema = new mongoose.Schema({
   total_contacts: { type: Number, default: 0 },
   contact_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Contact' }],
   requires_follow_up: { type: Boolean, default: false },
-  interactive_params: { type: mongoose.Schema.Types.Mixed }, // to store things like imageLink, offerCode
+  interactive_params: mongoose.Schema.Types.Mixed, // to store things like imageLink, offerCode
+  components: [mongoose.Schema.Types.Mixed], // store template variables/parameters
   sent_count: { type: Number, default: 0 },
   delivered_count: { type: Number, default: 0 },
   read_count: { type: Number, default: 0 },

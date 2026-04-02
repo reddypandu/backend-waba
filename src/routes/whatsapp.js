@@ -284,19 +284,20 @@ router.post('/campaigns', requireAuth, async (req, res) => {
       campaignContactIds = allContacts.map(c => c._id);
     }
 
-    const campaign = await Campaign.create({
-      user_id: req.user.id,
-      name,
-      template_name,
-      audience_type,
-      schedule_type,
-      scheduled_at: scheduled_at || null,
-      total_contacts: campaignContactIds.length,
-      contact_ids: campaignContactIds, // Assuming we added this to model if not already exists
-      status: schedule_type === 'scheduled' ? 'scheduled' : 'draft',
-      requires_follow_up,
-      interactive_params,
-    });
+      const campaign = await Campaign.create({
+        user_id: req.user.id,
+        name,
+        template_name,
+        audience_type,
+        schedule_type,
+        scheduled_at: scheduled_at || null,
+        total_contacts: campaignContactIds.length,
+        contact_ids: campaignContactIds,
+        status: schedule_type === 'scheduled' ? 'scheduled' : 'draft',
+        requires_follow_up,
+        interactive_params,
+        components: req.body.components || [], // Save template variables
+      });
 
     res.json({ success: true, campaign_id: campaign._id });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -317,32 +318,50 @@ router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
 
     // Fire and forget (or use a background worker if available)
     (async () => {
-      const { template_name, contact_ids, requires_follow_up, interactive_params } = campaign;
+      const { template_name, contact_ids, requires_follow_up, interactive_params, components: templateComponents = [] } = campaign;
       const contacts = await Contact.find({ _id: { $in: contact_ids } });
       
-      let components = [];
+      // We will build a Map of components by type to ensure uniqueness
+      const componentsMap = new Map();
+      
+      // 1. Start with template variables (from the new UI)
+      if (templateComponents && Array.isArray(templateComponents)) {
+        templateComponents.forEach(comp => {
+          if (comp.type) componentsMap.set(comp.type, comp);
+        });
+      }
+      
+      // 2. Merge/Overwrite with interactive_params (legacy support)
       if (interactive_params) {
-        if (interactive_params.header_image_url) {
-          components.push({
+        // If template doesn't have a header but user provided one via interactive_params
+        if (interactive_params.header_image_url && !componentsMap.has('header')) {
+          componentsMap.set('header', {
             type: "header",
             parameters: [{ type: "image", image: { link: interactive_params.header_image_url } }]
           });
         }
+        
         if (interactive_params.offer_code) {
-          // LTO expiration 48 hrs from now
           const futureTime = new Date(new Date().getTime() + (48 * 60 * 60 * 1000));
-          components.push({
-            type: "limited_time_offer",
-            parameters: [{ type: "limited_time_offer", limited_time_offer: { expiration_time_ms: futureTime.getTime() } }]
-          });
-          components.push({
-            type: "button",
-            sub_type: "copy_code",
-            index: 0,
-            parameters: [{ type: "coupon_code", coupon_code: interactive_params.offer_code }]
-          });
+          // Create or Add to button parameters (Limited Time Offer usually is index 0 or requires specific placeholders)
+          // For safety, we only add these if they don't conflict with existing button params
+          if (!componentsMap.has('button')) {
+            componentsMap.set('limited_time_offer', {
+              type: "limited_time_offer",
+              parameters: [{ type: "limited_time_offer", limited_time_offer: { expiration_time_ms: futureTime.getTime() } }]
+            });
+            componentsMap.set('button', {
+              type: "button",
+              sub_type: "copy_code",
+              index: 0,
+              parameters: [{ type: "coupon_code", coupon_code: interactive_params.offer_code }]
+            });
+          }
         }
       }
+
+      // Convert back to Array for Meta API
+      const finalComponents = Array.from(componentsMap.values());
       
       let sent = 0, failed = 0;
       for (const contact of contacts) {
@@ -357,7 +376,7 @@ router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
               template: { 
                  name: template_name, 
                  language: { code: 'en' },
-                 ...(components.length > 0 && { components })
+                 ...(finalComponents.length > 0 && { components: finalComponents })
               } 
             }),
           });
