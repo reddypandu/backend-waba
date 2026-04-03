@@ -14,7 +14,6 @@ const TemplateSchema = new mongoose.Schema({
   buttons: { type: mongoose.Schema.Types.Mixed },
   meta_template_id: { type: String },
   local_url: { type: String }, // Persistently store local media URL
-  needs_media_update: { type: Boolean, default: false }, // Flag for expired CDN links
 }, { timestamps: true });
 
 export default mongoose.model('Template', TemplateSchema);

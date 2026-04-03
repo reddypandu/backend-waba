@@ -85,8 +85,6 @@ router.post('/', requireAuth, async (req, res) => {
       // Update local MongoDB templates with statuses from Meta
       if (action === 'sync_templates') {
         for (const mt of metaTemplates) {
-          const hasMediaHeader = mt.components?.some(c => c.type === 'HEADER' && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(c.format));
-          
           await Template.findOneAndUpdate(
             { user_id: userId, name: mt.name },
             { 
@@ -95,10 +93,9 @@ router.post('/', requireAuth, async (req, res) => {
                 category: mt.category, 
                 language: mt.language,
                 components: mt.components,
-                meta_template_id: mt.id,
-                // If it's a media template and we don't have a local_url, mark it for update
-                needs_media_update: !!hasMediaHeader
+                meta_template_id: mt.id 
               }
+              // This is a partial update ($set), so it will NOT touch our custom 'local_url' field!
             },
             { upsert: true }
           );
