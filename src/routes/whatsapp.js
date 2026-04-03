@@ -11,6 +11,8 @@ import Template from '../models/Template.js';
 import Message from '../models/Message.js';
 import User from '../models/User.js';
 import Conversation from '../models/Conversation.js';
+import { sendCampaign } from '../utils/campaign.js';
+import { fileURLToPath } from 'url';
 
 const router = Router();
 const META_API = 'https://graph.facebook.com/v24.0';
@@ -62,7 +64,7 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
   }
 });
 
-import { fileURLToPath } from 'url'; // Required for __dirname
+
 
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
@@ -85,11 +87,14 @@ router.post('/', requireAuth, async (req, res) => {
           await Template.findOneAndUpdate(
             { user_id: userId, name: mt.name },
             { 
-              status: mt.status, 
-              category: mt.category, 
-              language: mt.language,
-              components: mt.components,
-              meta_template_id: mt.id 
+              $set: {
+                status: mt.status, 
+                category: mt.category, 
+                language: mt.language,
+                components: mt.components,
+                meta_template_id: mt.id 
+              }
+              // This is a partial update ($set), so it will NOT touch our custom 'local_url' field!
             },
             { upsert: true }
           );
@@ -97,11 +102,14 @@ router.post('/', requireAuth, async (req, res) => {
       }
       // Mark account as verified on successful sync/fetch
       await WhatsAppAccount.findOneAndUpdate({ user_id: userId }, { verification_status: 'verified' });
-      return res.json({ templates: metaTemplates });
+      
+      const allTemplates = await Template.find({ user_id: userId });
+      console.log(`[Sync] Found ${allTemplates.length} templates. ${allTemplates.filter(t => t.local_url).length} have local_url.`);
+      return res.json({ templates: allTemplates });
     }
 
     if (action === 'create_template') {
-      const { name, category, language, components } = params;
+      const { name, category, language, components, local_url } = params;
       const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
@@ -111,7 +119,7 @@ router.post('/', requireAuth, async (req, res) => {
       if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Meta API error' });
       
       const newTemplate = await Template.create({
-        user_id: userId, name, category, language, components, status: 'PENDING', meta_template_id: data.id
+        user_id: userId, name, category, language, components, status: 'PENDING', meta_template_id: data.id, local_url: local_url
       });
       return res.json({ success: true, template: newTemplate });
     }
@@ -333,7 +341,7 @@ router.post('/campaigns', requireAuth, async (req, res) => {
         scheduled_at: scheduled_at || null,
         total_contacts: campaignContactIds.length,
         contact_ids: campaignContactIds,
-        status: schedule_type === 'scheduled' ? 'scheduled' : 'draft',
+        status: schedule_type === 'later' ? 'scheduled' : 'draft',
         requires_follow_up,
         interactive_params,
         components: req.body.components || [], // Save template variables
@@ -345,127 +353,12 @@ router.post('/campaigns', requireAuth, async (req, res) => {
 
 router.post('/campaigns/:id/send', requireAuth, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, user_id: req.user.id });
-    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    if (campaign.status === 'running') return res.status(400).json({ error: 'Campaign already running' });
-
-    const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
-    if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured' });
-
-    campaign.status = 'running';
-    campaign.started_at = new Date();
-    await campaign.save();
-
-    // Fire and forget (or use a background worker if available)
-    (async () => {
-      const { template_name, contact_ids, requires_follow_up, interactive_params, components: templateComponents = [] } = campaign;
-      const contacts = await Contact.find({ _id: { $in: contact_ids } });
-      
-      // We will build a Map of components by type to ensure uniqueness
-      const componentsMap = new Map();
-      
-      // 1. Start with template variables (from the new UI)
-      if (templateComponents && Array.isArray(templateComponents)) {
-        templateComponents.forEach(comp => {
-          if (comp.type) componentsMap.set(comp.type, comp);
-        });
-      }
-      
-      // 2. Merge/Overwrite with interactive_params (legacy support)
-      if (interactive_params) {
-        // If template doesn't have a header but user provided one via interactive_params
-        if (interactive_params.header_image_url && !componentsMap.has('header')) {
-          componentsMap.set('header', {
-            type: "header",
-            parameters: [{ type: "image", image: { link: interactive_params.header_image_url } }]
-          });
-        }
-        
-        if (interactive_params.offer_code) {
-          const futureTime = new Date(new Date().getTime() + (48 * 60 * 60 * 1000));
-          // Create or Add to button parameters (Limited Time Offer usually is index 0 or requires specific placeholders)
-          // For safety, we only add these if they don't conflict with existing button params
-          if (!componentsMap.has('button')) {
-            componentsMap.set('limited_time_offer', {
-              type: "limited_time_offer",
-              parameters: [{ type: "limited_time_offer", limited_time_offer: { expiration_time_ms: futureTime.getTime() } }]
-            });
-            componentsMap.set('button', {
-              type: "button",
-              sub_type: "copy_code",
-              index: 0,
-              parameters: [{ type: "coupon_code", coupon_code: interactive_params.offer_code }]
-            });
-          }
-        }
-      }
-
-      // Convert back to Array for Meta API
-      const finalComponents = Array.from(componentsMap.values());
-      
-      let sent = 0, failed = 0;
-      for (const contact of contacts) {
-        try {
-          const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messaging_product: 'whatsapp',
-              to: contact.phone_number,
-              type: 'template',
-              template: { 
-                 name: template_name, 
-                 language: { code: 'en' },
-                 ...(finalComponents.length > 0 && { components: finalComponents })
-              } 
-            }),
-          });
-          const data = await r.json();
-          const msgId = data.messages?.[0]?.id;
-          
-          if (r.ok) {
-            sent++;
-            // Create outgoing message link to campaign
-            await Message.create({
-              user_id: req.user.id,
-              contact_id: contact._id,
-              campaign_id: campaign._id,
-              direction: 'outbound',
-              message_type: 'template',
-              template_name,
-              phone_number: contact.phone_number,
-              whatsapp_message_id: msgId,
-              status: 'sent',
-              requires_follow_up
-            });
-          } else {
-            failed++;
-            await Message.create({
-               user_id: req.user.id,
-               contact_id: contact._id,
-               campaign_id: campaign._id,
-               direction: 'outbound',
-               message_type: 'template',
-               template_name,
-               phone_number: contact.phone_number,
-               status: 'failed',
-               error_details: data.error?.message
-            });
-          }
-        } catch (err) {
-          failed++;
-          console.error(`Send error for ${contact.phone_number}:`, err.message);
-        }
-      }
-      campaign.status = 'completed';
-      campaign.completed_at = new Date();
-      await campaign.save();
-      await User.findByIdAndUpdate(req.user.id, { $inc: { 'subscription.messages_used': sent } });
-    })().catch(e => console.error('Campaign background loop error:', e));
-
-    res.json({ success: true, message: 'Campaign started successfully' });
+    const result = await sendCampaign(req.params.id);
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+ 
 
 router.get('/campaigns/:id/stats', requireAuth, async (req, res) => {
   try {

@@ -13,6 +13,7 @@ const TemplateSchema = new mongoose.Schema({
   footer_text: { type: String },
   buttons: { type: mongoose.Schema.Types.Mixed },
   meta_template_id: { type: String },
+  local_url: { type: String }, // Persistently store local media URL
 }, { timestamps: true });
 
 export default mongoose.model('Template', TemplateSchema);

@@ -13,6 +13,7 @@ import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
 import designRoutes from './routes/designs.js';
 import uploadPersistRoutes from './routes/uploads.js';
+import { startCampaignWorker } from './workers/campaignWorker.js';
 
 // Register Models
 import './models/User.js';
@@ -101,4 +102,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5005;
-app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on port ${PORT}`);
+  startCampaignWorker();
+});
