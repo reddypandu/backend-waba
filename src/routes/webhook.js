@@ -9,7 +9,7 @@ import { AutoReply } from '../models/Automation.js';
 import Conversation from '../models/Conversation.js';
 
 const router = Router();
-const META_API = 'https://graph.facebook.com/v24.0';
+const META_API = 'https://graph.facebook.com/v22.0';
 
 // ── GET: Verification ────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
@@ -93,7 +93,13 @@ router.post('/', async (req, res) => {
 
         if (value.statuses) {
           for (const s of value.statuses) {
-            const updatedMsg = await Message.findOneAndUpdate({ whatsapp_message_id: s.id }, { status: s.status });
+            const statusUpdate = { status: s.status };
+            if (s.status === 'failed') {
+              console.log(`[Webhook Status Detail] ❌ FAILED Event:`, JSON.stringify(s, null, 2));
+              statusUpdate.error_details = s.errors?.[0]?.message || s.error_data?.details || 'Meta Delivery Failure';
+              console.log(`[Webhook Status] ❌ Message ${s.id} failed: ${statusUpdate.error_details}`);
+            }
+            const updatedMsg = await Message.findOneAndUpdate({ whatsapp_message_id: s.id }, statusUpdate);
             
             // Automated Follow-up Logic (from sample app): If message was flagged for follow-up and was delivered/read
             if (updatedMsg && updatedMsg.requires_follow_up && (s.status === 'delivered' || s.status === 'read')) {
@@ -186,6 +192,7 @@ async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, conv
 
   for (const rule of rules) {
     const keywords = rule.keyword.split(',').map(k => k.toLowerCase().trim());
+    console.log(`[AutoReply] Checking rule "${rule.keyword}" against input "${lower}"`);
     const isMatched = keywords.some(kw => {
       if (!kw) return false;
       if (rule.match_type === 'exact' && lower === kw) return true;
@@ -194,9 +201,16 @@ async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, conv
       return false;
     });
 
-    if (isMatched) { matched = rule; break; }
+    if (isMatched) { 
+      console.log(`[AutoReply] ✅ Match found! Pattern: ${rule.match_type}, Trigger: ${lower}`);
+      matched = rule; 
+      break; 
+    }
   }
-  if (!matched) return;
+  if (!matched) {
+    console.log(`[AutoReply] ❌ No match found for input "${lower}" among ${rules.length} rules.`);
+    return;
+  }
 
   const r = await fetch(`${META_API}/${phoneNumberId}/messages`, {
     method: 'POST',

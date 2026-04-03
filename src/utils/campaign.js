@@ -43,9 +43,16 @@ async function processCampaignInBackground(campaign, waAccount) {
     
     if (interactive_params) {
       if (interactive_params.header_image_url && !componentsMap.has('header')) {
+        const url = interactive_params.header_image_url;
+        const isVideo = url.match(/\.(mp4|webm|ogg)$/i) || template_name.toLowerCase().includes('video');
+        const mediaType = isVideo ? "video" : "image";
+        
         componentsMap.set('header', {
           type: "header",
-          parameters: [{ type: "image", image: { link: interactive_params.header_image_url } }]
+          parameters: [{ 
+            type: mediaType, 
+            [mediaType]: { link: url } 
+          }]
         });
       }
       if (interactive_params.offer_code) {

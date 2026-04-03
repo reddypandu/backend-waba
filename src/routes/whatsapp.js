@@ -15,7 +15,7 @@ import { sendCampaign } from '../utils/campaign.js';
 import { fileURLToPath } from 'url';
 
 const router = Router();
-const META_API = 'https://graph.facebook.com/v24.0';
+const META_API = 'https://graph.facebook.com/v22.0';
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -34,9 +34,10 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
     const filename = `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`;
     fs.writeFileSync(path.join(assetPath, filename), file.buffer);
 
-    // Build accessible URL
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    // Build accessible URL – FORCE HTTPS for non-localhost to satisfy Meta requirements
     const host = req.get('host');
+    const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
+    const protocol = isLocal ? (req.headers['x-forwarded-proto'] || req.protocol) : 'https';
     const localUrl = `${protocol}://${host}/uploads/templates/${filename}`;
 
     // Get Meta Handle
@@ -84,6 +85,8 @@ router.post('/', requireAuth, async (req, res) => {
       // Update local MongoDB templates with statuses from Meta
       if (action === 'sync_templates') {
         for (const mt of metaTemplates) {
+          const hasMediaHeader = mt.components?.some(c => c.type === 'HEADER' && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(c.format));
+          
           await Template.findOneAndUpdate(
             { user_id: userId, name: mt.name },
             { 
@@ -92,9 +95,10 @@ router.post('/', requireAuth, async (req, res) => {
                 category: mt.category, 
                 language: mt.language,
                 components: mt.components,
-                meta_template_id: mt.id 
+                meta_template_id: mt.id,
+                // If it's a media template and we don't have a local_url, mark it for update
+                needs_media_update: !!hasMediaHeader
               }
-              // This is a partial update ($set), so it will NOT touch our custom 'local_url' field!
             },
             { upsert: true }
           );
@@ -152,6 +156,21 @@ router.post('/', requireAuth, async (req, res) => {
         { upsert: true, new: true }
       );
 
+      // Build a preview text for the Inbox list
+      const bodyComp = (components || []).find(c => c.type === 'body');
+      let previewContent = `[Template: ${template_name}]`;
+      if (bodyComp && bodyComp.parameters) {
+        // Simple preview of body variables
+        const varText = bodyComp.parameters.map(p => p.text).join(', ');
+        previewContent = `${template_name}: ${varText}`;
+      }
+
+      // Extract media URL if present
+      const headerComp = (components || []).find(c => c.type === 'header');
+      const mediaUrl = headerComp?.parameters?.[0]?.image?.link || 
+                        headerComp?.parameters?.[0]?.video?.link || 
+                        headerComp?.parameters?.[0]?.document?.link;
+
       await Message.create({ 
         user_id: userId, 
         conversation_id: conv._id,
@@ -159,11 +178,13 @@ router.post('/', requireAuth, async (req, res) => {
         direction: 'outbound', 
         message_type: 'template', 
         template_name, 
+        content: previewContent,
+        media_url: mediaUrl,
         phone_number: to, 
         whatsapp_message_id: msgId, 
         status: 'sent', 
         requires_follow_up 
-      }).catch(() => {});
+      });
 
       await WhatsAppAccount.findOneAndUpdate({ user_id: userId }, { verification_status: 'verified' });
       return res.json({ success: true, message_id: msgId, conversation_id: conv._id });
@@ -403,7 +424,11 @@ router.post('/campaigns/:id/retarget', requireAuth, async (req, res) => {
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     // Find messages that failed for this campaign
-    const failedMessages = await Message.find({ campaign_id: campaign._id, status: 'failed' });
+    const failedMessages = await Message.find({ 
+      campaign_id: new mongoose.Types.ObjectId(campaign._id), 
+      user_id: new mongoose.Types.ObjectId(req.user.id),
+      status: 'failed' 
+    });
     if (failedMessages.length === 0) return res.json({ success: true, sent: 0, message: 'No failed messages to retarget' });
 
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
@@ -411,6 +436,7 @@ router.post('/campaigns/:id/retarget', requireAuth, async (req, res) => {
     let sent = 0;
     for (const msg of failedMessages) {
       try {
+        const components = campaign.components || [];
         const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
@@ -418,7 +444,11 @@ router.post('/campaigns/:id/retarget', requireAuth, async (req, res) => {
             messaging_product: 'whatsapp',
             to: msg.phone_number,
             type: 'template',
-            template: { name: campaign.template_name, language: { code: 'en' } }
+            template: { 
+              name: campaign.template_name, 
+              language: { code: 'en' },
+              ...(components.length > 0 && { components })
+            }
           }),
         });
         const data = await r.json();
@@ -439,9 +469,9 @@ router.post('/campaigns/:id/retarget', requireAuth, async (req, res) => {
 router.get('/messages-by-campaign/:id', requireAuth, async (req, res) => {
   try {
     const messages = await Message.find({ 
-      user_id: req.user.id, 
-      campaign_id: req.params.id 
-    }).sort({ createdAt: 1 });
+      user_id: new mongoose.Types.ObjectId(req.user.id), 
+      campaign_id: new mongoose.Types.ObjectId(req.params.id) 
+    }).sort({ createdAt: -1 });
     res.json({ messages });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

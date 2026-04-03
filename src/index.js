@@ -38,6 +38,7 @@ const addWebhookLog = (log) => {
 };
 
 const app = express();
+app.set('trust proxy', 1);
 
 // ── CORS (Must be at the very top) ───────────────────────────────────────────
 app.use(cors({
