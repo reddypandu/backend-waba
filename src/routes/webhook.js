@@ -185,10 +185,16 @@ async function checkAutoReply(userId, to, text, phoneNumberId, accessToken, conv
   let matched = null;
 
   for (const rule of rules) {
-    const kw = rule.keyword.toLowerCase().trim();
-    if (rule.match_type === 'exact' && lower === kw) { matched = rule; break; }
-    if (rule.match_type === 'starts_with' && lower.startsWith(kw)) { matched = rule; break; }
-    if (rule.match_type === 'contains' && lower.includes(kw)) { matched = rule; break; }
+    const keywords = rule.keyword.split(',').map(k => k.toLowerCase().trim());
+    const isMatched = keywords.some(kw => {
+      if (!kw) return false;
+      if (rule.match_type === 'exact' && lower === kw) return true;
+      if (rule.match_type === 'starts_with' && lower.startsWith(kw)) return true;
+      if (rule.match_type === 'contains' && lower.includes(kw)) return true;
+      return false;
+    });
+
+    if (isMatched) { matched = rule; break; }
   }
   if (!matched) return;
 
