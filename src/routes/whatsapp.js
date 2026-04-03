@@ -23,11 +23,19 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file provided' });
     
-    // Save locally
-    const assetPath = path.resolve('..', 'frontend-waba', 'src', 'assets', 'templates');
+    // Save to public uploads
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const assetPath = path.join(__dirname, '..', 'public', 'uploads', 'templates');
     if (!fs.existsSync(assetPath)) fs.mkdirSync(assetPath, { recursive: true });
+    
     const filename = `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`;
     fs.writeFileSync(path.join(assetPath, filename), file.buffer);
+
+    // Build accessible URL
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const localUrl = `${protocol}://${host}/uploads/templates/${filename}`;
 
     // Get Meta Handle
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
@@ -48,11 +56,13 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
     const upData = await upRes.json();
     if (upData.error) throw new Error(upData.error.message);
 
-    res.json({ success: true, handle: upData.h, localPath: `/src/assets/templates/${filename}` });
+    res.json({ success: true, handle: upData.h, localPath: localUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+import { fileURLToPath } from 'url'; // Required for __dirname
 
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
@@ -193,19 +203,27 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     if (action === 'edit_template') {
-      const { id, category, components } = params;
+      const { name, category, components } = params;
       const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: params.name, category, components }),
+        body: JSON.stringify({ name, category, components }),
       });
       const data = await r.json();
       if (!r.ok) return res.status(400).json({ error: data.error?.message || 'Meta API error' });
       
       await Template.findOneAndUpdate(
-        { user_id: userId, name: params.name },
+        { user_id: userId, name: name },
         { category, components, status: 'PENDING' }
       );
+      return res.json({ success: true });
+    }
+
+    if (action === 'delete_campaign') {
+      const { id } = params;
+      if (!id) return res.status(400).json({ error: 'Campaign ID required' });
+      await Campaign.findOneAndDelete({ _id: id, user_id: userId });
+      await Message.deleteMany({ campaign_id: id, user_id: userId });
       return res.json({ success: true });
     }
 
@@ -258,7 +276,29 @@ router.get('/templates/:id', requireAuth, async (req, res) => {
 // ── Campaigns ─────────────────────────────────────────────────────────────────
 router.get('/campaigns', requireAuth, async (req, res) => {
   try {
-    const campaigns = await Campaign.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+    const campaigns = await Campaign.aggregate([
+      { $match: { user_id: new mongoose.Types.ObjectId(req.user.id) } },
+      { $sort: { createdAt: -1 } },
+      {
+        $lookup: {
+          from: 'messages',
+          localField: '_id',
+          foreignField: 'campaign_id',
+          as: 'msgs'
+        }
+      },
+      {
+        $addFields: {
+          stats: {
+            sent: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['sent', 'delivered', 'read', 'replied']] } } } },
+            delivered: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['delivered', 'read', 'replied']] } } } },
+            read: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['read', 'replied']] } } } },
+            failed: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $eq: ['$$m.status', 'failed'] } } } }
+          }
+        }
+      },
+      { $project: { msgs: 0 } }
+    ]);
     res.json({ campaigns });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -437,24 +477,25 @@ router.get('/campaigns/:id/stats', requireAuth, async (req, res) => {
           user_id: new mongoose.Types.ObjectId(req.user.id)
         } 
       },
-      { $group: { _id: '$status', count: { $sum: 1 } } }
+      {
+        $group: {
+          _id: null,
+          sent: { $sum: { $cond: [{ $in: ['$status', ['sent', 'delivered', 'read', 'replied']] }, 1, 0] } },
+          delivered: { $sum: { $cond: [{ $in: ['$status', ['delivered', 'read', 'replied']] }, 1, 0] } },
+          read: { $sum: { $cond: [{ $in: ['$status', ['read', 'replied']] }, 1, 0] } },
+          failed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+          replied: { $sum: { $cond: [{ $eq: ['$status', 'replied'] }, 1, 0] } }
+        }
+      }
     ]);
 
-    const result = {
+    const result = stats[0] || {
       sent: 0,
       delivered: 0,
       read: 0,
       failed: 0,
       replied: 0
     };
-
-    stats.forEach(s => {
-      if (s._id === 'sent') result.sent = s.count;
-      else if (s._id === 'delivered') result.delivered = s.count;
-      else if (s._id === 'read') result.read = s.count;
-      else if (s._id === 'failed') result.failed = s.count;
-      else if (s._id === 'replied') result.replied = s.count;
-    });
 
     // Special case: 'sent' includes everything that got out
     // In many UIs, 'Sent' is treated as total attempted successfully

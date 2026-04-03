@@ -59,6 +59,13 @@ app.use((req, res, next) => {
   next();
 });
 
+// Serve static files
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
+
 // ── Rate Limiting ────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 mins
