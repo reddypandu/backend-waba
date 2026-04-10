@@ -3,7 +3,7 @@ import Contact from '../models/Contact.js';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import Message from '../models/Message.js';
 
-const META_API = 'https://graph.facebook.com/v21.0';
+const META_API = 'https://graph.facebook.com/v22.0';
 
 /**
  * Sends a campaign based on its current configuration
@@ -94,6 +94,12 @@ async function processCampaignInBackground(campaign, waAccount) {
         const data = await r.json();
         const msgId = data.messages?.[0]?.id;
         
+        // Extract media URL for history
+        const headerComp = finalComponents.find(c => c.type === 'header');
+        const mediaUrl = headerComp?.parameters?.[0]?.image?.link || 
+                          headerComp?.parameters?.[0]?.video?.link || 
+                          headerComp?.parameters?.[0]?.document?.link;
+
         if (r.ok) {
           sent++;
           await Message.create({
@@ -103,6 +109,8 @@ async function processCampaignInBackground(campaign, waAccount) {
             direction: 'outbound',
             message_type: 'template',
             template_name,
+            content: `[Template: ${template_name}]`, // Ensure some content text
+            media_url: mediaUrl,
             phone_number: contact.phone_number,
             whatsapp_message_id: msgId,
             status: 'sent',

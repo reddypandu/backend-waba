@@ -12,6 +12,7 @@ import Message from '../models/Message.js';
 import User from '../models/User.js';
 import Conversation from '../models/Conversation.js';
 import { sendCampaign } from '../utils/campaign.js';
+import { uploadToCloudinary } from '../services/cloudinary.js';
 import { fileURLToPath } from 'url';
 
 const router = Router();
@@ -25,22 +26,31 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file provided' });
     
-    // Save to public uploads
+    // 1. Save locally as backup
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
     const assetPath = path.join(__dirname, '..', 'public', 'uploads', 'templates');
     if (!fs.existsSync(assetPath)) fs.mkdirSync(assetPath, { recursive: true });
     
     const filename = `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`;
-    fs.writeFileSync(path.join(assetPath, filename), file.buffer);
+    const localFilePath = path.join(assetPath, filename);
+    fs.writeFileSync(localFilePath, file.buffer);
 
-    // Build accessible URL – FORCE HTTPS for non-localhost to satisfy Meta requirements
+    // 2. Upload to Cloudinary for reliable public HTTPS URL
+    let cloudUrl = null;
+    try {
+      cloudUrl = await uploadToCloudinary(localFilePath);
+    } catch (cErr) {
+      console.error('Cloudinary upload failed, falling back to local:', cErr);
+    }
+
+    // Build accessible URL
     const host = req.get('host');
     const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
     const protocol = isLocal ? (req.headers['x-forwarded-proto'] || req.protocol) : 'https';
-    const localUrl = `${protocol}://${host}/uploads/templates/${filename}`;
+    const localUrl = cloudUrl || `${protocol}://${host}/uploads/templates/${filename}`;
 
-    // Get Meta Handle
+    // 3. Get Meta Handle (Required for template creation)
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
     if (!waAccount) return res.status(400).json({ error: 'WhatsApp account not linked' });
     
@@ -61,6 +71,7 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
 
     res.json({ success: true, handle: upData.h, localPath: localUrl });
   } catch (err) {
+    console.error('Upload media error:', err);
     res.status(500).json({ error: err.message });
   }
 });

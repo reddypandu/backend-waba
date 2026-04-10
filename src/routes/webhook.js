@@ -9,7 +9,7 @@ import { AutoReply } from '../models/Automation.js';
 import Conversation from '../models/Conversation.js';
 
 const router = Router();
-const META_API = 'https://graph.facebook.com/v21.0';
+const META_API = 'https://graph.facebook.com/v22.0';
 
 // ── GET: Verification ────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
