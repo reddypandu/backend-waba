@@ -2,6 +2,7 @@ import Campaign from '../models/Campaign.js';
 import Contact from '../models/Contact.js';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import Message from '../models/Message.js';
+import Conversation from '../models/Conversation.js';
 
 const META_API = 'https://graph.facebook.com/v22.0';
 
@@ -100,16 +101,31 @@ async function processCampaignInBackground(campaign, waAccount) {
                           headerComp?.parameters?.[0]?.video?.link || 
                           headerComp?.parameters?.[0]?.document?.link;
 
+        // 1. Ensure Conversation exists and is updated
+        const conversation = await Conversation.findOneAndUpdate(
+          { user_id: campaign.user_id, contact_id: contact._id },
+          { 
+            $set: { 
+              phone_number: contact.phone_number, 
+              last_message: `[Template: ${template_name}]`, 
+              last_message_at: new Date(), 
+              status: 'open' 
+            } 
+          },
+          { upsert: true, returnDocument: 'after' }
+        );
+
         if (r.ok) {
           sent++;
           await Message.create({
             user_id: campaign.user_id,
+            conversation_id: conversation?._id,
             contact_id: contact._id,
             campaign_id: campaign._id,
             direction: 'outbound',
             message_type: 'template',
             template_name,
-            content: `[Template: ${template_name}]`, // Ensure some content text
+            content: `[Template: ${template_name}]`,
             media_url: mediaUrl,
             phone_number: contact.phone_number,
             whatsapp_message_id: msgId,
@@ -120,11 +136,13 @@ async function processCampaignInBackground(campaign, waAccount) {
           failed++;
           await Message.create({
             user_id: campaign.user_id,
+            conversation_id: conversation?._id,
             contact_id: contact._id,
             campaign_id: campaign._id,
             direction: 'outbound',
             message_type: 'template',
             template_name,
+            content: `[Failed Template: ${template_name}]`,
             phone_number: contact.phone_number,
             status: 'failed',
             error_details: data.error?.message || 'Meta API Error'
