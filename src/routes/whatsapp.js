@@ -96,18 +96,36 @@ router.post('/', requireAuth, async (req, res) => {
       // Update local MongoDB templates with statuses from Meta
       if (action === 'sync_templates') {
         for (const mt of metaTemplates) {
-          await Template.findOneAndUpdate(
-            { user_id: userId, name: mt.name },
-            { 
-              $set: {
+          
+          let cloudinaryUrl = undefined;
+          const header = mt.components?.find(c => c.type === 'HEADER');
+          if (header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(header.format)) {
+             const existing = await Template.findOne({ user_id: userId, name: mt.name });
+             // We only upload if it has NO local_url!
+             if (!existing || !existing.local_url) {
+                const exampleUrl = header.example?.header_handle?.[0] || header.example?.header_url?.[0];
+                if (exampleUrl) {
+                   try {
+                     cloudinaryUrl = await uploadToCloudinary(exampleUrl);
+                   } catch(err) {
+                     console.error(`[Sync] Failed to upload media for ${mt.name}:`, err.message);
+                   }
+                }
+             }
+          }
+          
+          const updateData = {
                 status: mt.status, 
                 category: mt.category, 
                 language: mt.language,
                 components: mt.components,
                 meta_template_id: mt.id 
-              }
-              // This is a partial update ($set), so it will NOT touch our custom 'local_url' field!
-            },
+          };
+          if (cloudinaryUrl) updateData.local_url = cloudinaryUrl;
+
+          await Template.findOneAndUpdate(
+            { user_id: userId, name: mt.name },
+            { $set: updateData },
             { upsert: true }
           );
         }
