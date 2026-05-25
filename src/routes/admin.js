@@ -13,6 +13,7 @@ import Conversation from "../models/Conversation.js";
 import { AutoReply, Workflow } from "../models/Automation.js";
 import WalletTransaction from "../models/WalletTransaction.js";
 import Design from "../models/Design.js";
+import { cloudinary } from "../services/cloudinary.js";
 import {
   syncAccountStatusFromMeta,
   updateAccountWithMetaStatus,
@@ -22,6 +23,62 @@ import {
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+const extractCloudinaryPublicId = (url) => {
+  if (!url || typeof url !== "string" || !url.includes("cloudinary.com")) {
+    return null;
+  }
+
+  try {
+    const pathname = new URL(url).pathname;
+    const uploadIndex = pathname.indexOf("/upload/");
+    if (uploadIndex === -1) return null;
+
+    let publicPath = pathname.slice(uploadIndex + "/upload/".length);
+    publicPath = publicPath.replace(/^v\d+\//, "");
+    publicPath = decodeURIComponent(publicPath);
+    return publicPath.replace(/\.[^/.]+$/, "");
+  } catch {
+    return null;
+  }
+};
+
+const deleteCloudinaryAssetsForUser = async (userId, urls = []) => {
+  const result = {
+    prefixDeleted: 0,
+    urlDeleted: 0,
+    failed: [],
+  };
+
+  try {
+    const prefixResult = await cloudinary.api.delete_resources_by_prefix(
+      `user-${userId}/`,
+      { resource_type: "image" },
+    );
+    result.prefixDeleted = Object.keys(prefixResult?.deleted || {}).length;
+  } catch (err) {
+    result.failed.push(`prefix:user-${userId} (${err.message})`);
+  }
+
+  const publicIds = [
+    ...new Set(urls.map(extractCloudinaryPublicId).filter(Boolean)),
+  ];
+
+  await Promise.all(
+    publicIds.map(async (publicId) => {
+      try {
+        const destroyResult = await cloudinary.uploader.destroy(publicId, {
+          resource_type: "image",
+        });
+        if (destroyResult?.result === "ok") result.urlDeleted += 1;
+      } catch (err) {
+        result.failed.push(`${publicId} (${err.message})`);
+      }
+    }),
+  );
+
+  return result;
+};
 
 // ── /me — Full dashboard data ─────────────────────────────────────────────────
 router.get("/me", requireAuth, async (req, res) => {
@@ -229,6 +286,27 @@ router.delete("/users/:id", requireAuth, async (req, res) => {
 
     try {
       // Delete in order of dependencies (children first)
+      const [uploads, designs, templates, businesses] = await Promise.all([
+        Upload.find({ user_id: userId }).select("url"),
+        Design.find({ user_id: userId }).select("thumbnail_url"),
+        Template.find({ user_id: userId }).select("local_url header_content"),
+        Business.find({ user_id: userId }).select("profile_picture_url"),
+      ]);
+
+      const cloudinaryUrls = [
+        ...uploads.map((item) => item.url),
+        ...designs.map((item) => item.thumbnail_url),
+        ...templates.flatMap((item) => [item.local_url, item.header_content]),
+        ...businesses.map((item) => item.profile_picture_url),
+      ].filter(Boolean);
+
+      const cloudinaryDeleted = await deleteCloudinaryAssetsForUser(
+        userId,
+        cloudinaryUrls,
+      );
+      console.log(
+        `  [Cloudinary] deleted ${cloudinaryDeleted.prefixDeleted + cloudinaryDeleted.urlDeleted} assets; failures: ${cloudinaryDeleted.failed.length}`,
+      );
 
       // 1. Delete messages (child of conversations)
       const deletedMessages = await Message.deleteMany({ user_id: userId });
@@ -314,6 +392,9 @@ router.delete("/users/:id", requireAuth, async (req, res) => {
           whatsappAccounts: deletedWaAccount.deletedCount,
           uploads: deletedUploads.deletedCount,
           businesses: deletedBusiness.deletedCount,
+          cloudinaryAssets:
+            cloudinaryDeleted.prefixDeleted + cloudinaryDeleted.urlDeleted,
+          cloudinaryFailures: cloudinaryDeleted.failed,
           user: 1,
         },
         totalItemsDeleted:
@@ -329,6 +410,8 @@ router.delete("/users/:id", requireAuth, async (req, res) => {
           deletedWaAccount.deletedCount +
           deletedUploads.deletedCount +
           deletedBusiness.deletedCount +
+          cloudinaryDeleted.prefixDeleted +
+          cloudinaryDeleted.urlDeleted +
           1,
       });
     } catch (deleteErr) {
@@ -621,10 +704,49 @@ router.post("/whatsapp-accounts", requireAuth, async (req, res) => {
         access_token,
         phone_number,
         business_id: biz._id,
-        verification_status: "pending",
+        webhook_verified: true,
       },
       { upsert: true, new: true },
     );
+
+    try {
+      const syncResult = await syncAccountStatusFromMeta(wa);
+      await updateAccountWithMetaStatus(wa, syncResult);
+      if (syncResult.shouldRegister) {
+        console.log(`[Manual Setup] Auto-registering phone number ${phone_number_id}...`);
+        const registerRes = await fetch(
+          `https://graph.facebook.com/v24.0/${phone_number_id}/register`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${access_token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              pin: process.env.WHATSAPP_PHONE_PIN || "123456",
+            }),
+          }
+        );
+        if (registerRes.ok) {
+          await WhatsAppAccount.findByIdAndUpdate(wa._id, {
+            $set: { verification_status: "verified", meta_wa_status: "connected", registration_error: null },
+            $inc: { registration_attempt_count: 1 },
+            $currentDate: { last_registration_attempt: true }
+          });
+        } else {
+          const regErrData = await registerRes.json();
+          await WhatsAppAccount.findByIdAndUpdate(wa._id, {
+            $set: { registration_error: regErrData.error?.message || "Registration failed" },
+            $inc: { registration_attempt_count: 1 },
+            $currentDate: { last_registration_attempt: true }
+          });
+        }
+      }
+    } catch (syncErr) {
+      console.warn(`[Manual Setup] Status sync/register failed:`, syncErr.message);
+    }
+
     res.json({ success: true, id: wa._id });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1016,15 +1138,6 @@ router.post("/whatsapp-register", requireAuth, async (req, res) => {
 
     // SAFETY CHECKS
     if (!force) {
-      if (syncResult.isTestNumber) {
-        return res.json({
-          success: false,
-          reason: "test_number",
-          message: "This is a Meta test number. No registration needed.",
-          is_meta_test_number: true,
-        });
-      }
-
       if (syncResult.isMessaging) {
         return res.json({
           success: false,

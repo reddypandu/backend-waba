@@ -32,6 +32,11 @@ const WhatsAppAccountSchema = new mongoose.Schema(
 
     // NEW: Was this number already messaging (messages sent > 0)?
     was_messaging: { type: Boolean, default: false },
+
+    // Registration retry tracking
+    last_registration_attempt: { type: Date },
+    registration_error: { type: String },
+    registration_attempt_count: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

@@ -101,6 +101,54 @@ router.post("/", requireAuth, async (req, res) => {
           console.log(
             `[OAuth Register] Account ${phone_number_id} status synced: ${syncResult.metaStatus}, IsTest: ${syncResult.isTestNumber}`,
           );
+
+          if (syncResult.shouldRegister) {
+            try {
+              console.log(`[OAuth Register] Auto-registering phone number ${phone_number_id}...`);
+              const registerRes = await fetch(
+                `${META_API}/${phone_number_id}/register`,
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    messaging_product: "whatsapp",
+                    pin: process.env.WHATSAPP_PHONE_PIN || "123456",
+                  }),
+                }
+              );
+
+              if (registerRes.ok) {
+                await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
+                  $set: {
+                    verification_status: "verified",
+                    meta_wa_status: "connected",
+                    registration_error: null,
+                  },
+                  $inc: { registration_attempt_count: 1 },
+                  $currentDate: { last_registration_attempt: true }
+                });
+                console.log(`[OAuth Register] Auto-registration successful for ${phone_number_id}`);
+              } else {
+                const regErrData = await registerRes.json();
+                console.warn(`[OAuth Register] Auto-registration failed:`, regErrData);
+                await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
+                  $set: { registration_error: regErrData.error?.message || "Registration failed" },
+                  $inc: { registration_attempt_count: 1 },
+                  $currentDate: { last_registration_attempt: true }
+                });
+              }
+            } catch (regErr) {
+               console.error(`[OAuth Register] Auto-registration network error:`, regErr.message);
+               await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
+                 $set: { registration_error: regErr.message },
+                 $inc: { registration_attempt_count: 1 },
+                 $currentDate: { last_registration_attempt: true }
+               });
+            }
+          }
         } catch (syncErr) {
           console.warn(
             `[OAuth Register] Status sync failed (non-fatal):`,

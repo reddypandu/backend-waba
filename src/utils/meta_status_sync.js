@@ -81,7 +81,7 @@ export async function hasMessagingActivity(userId) {
  * Returns: { status, isTestNumber, isMessaging, shouldRegister }
  */
 export async function syncAccountStatusFromMeta(waAccount) {
-  const { user_id, phone_number_id, waba_id, access_token } = waAccount;
+  const { user_id, phone_number_id, waba_id, access_token, registration_attempt_count = 0 } = waAccount;
 
   try {
     // 1. Check if it's a test number
@@ -113,15 +113,14 @@ export async function syncAccountStatusFromMeta(waAccount) {
       );
     }
 
-    // 4. Determine if registration is needed
     // SAFE RULE: Only register if:
-    // - It's a real (non-test) number
     // - It's not already messaging
     // - Status is 'pending' or 'action_required'
+    // - We haven't tried too many times (retry protection)
     const shouldRegister =
-      !isTest &&
       !isMessaging &&
-      ["pending", "action_required"].includes(metaStatus);
+      ["pending", "action_required"].includes(metaStatus) &&
+      registration_attempt_count < 3;
 
     console.log(
       `[Meta Status Sync] Phone: ${phone_number_id}, Status: ${metaStatus}, IsTest: ${isTest}, IsMessaging: ${isMessaging}, ShouldRegister: ${shouldRegister}`,
@@ -160,6 +159,19 @@ export async function updateAccountWithMetaStatus(waAccount, syncResult) {
       meta_status_last_synced: syncResult.timestamp,
     };
 
+    // Update verification_status safely
+    if (syncResult.metaStatus === "connected") {
+      updateData.verification_status = "verified";
+    } else if (syncResult.metaStatus === "pending") {
+      if (!syncResult.isMessaging && waAccount.verification_status !== "verified") {
+        updateData.verification_status = "pending";
+      }
+    } else if (syncResult.metaStatus === "action_required") {
+      if (!syncResult.isMessaging && waAccount.verification_status !== "verified") {
+        updateData.verification_status = "action_required";
+      }
+    }
+
     if (syncResult.error) {
       updateData.meta_error_message = syncResult.error;
     }
@@ -192,25 +204,12 @@ export function getDashboardStatus(waAccount) {
     verification_status,
   } = waAccount;
 
-  // Priority order:
-  // 1. Meta test number with messaging = "sandbox" (Meta demo account, but works)
-  // 2. Real number + messaging = "connected"
-  // 3. Real number + pending Meta registration = "connecting"
-  // 4. Real number + action required = "action_required"
-  // 5. Meta test number (no messaging) = "test_number"
-  // 6. Not connected = "not_connected"
-
-  if (is_meta_test_number) {
-    if (was_messaging) return "sandbox"; // Test number that's actively used
-    return "test_number"; // Unused test number
+  if (meta_wa_status === "failed" || waAccount.registration_error) {
+    return "registration_failed";
   }
 
-  if (!meta_wa_status || meta_wa_status === "pending") {
-    if (was_messaging) return "connected"; // Messaging works even if pending
-    return "connecting";
-  }
-
-  if (meta_wa_status === "connected" || was_messaging) {
+  if (meta_wa_status === "connected" || was_messaging || verification_status === "verified") {
+    if (is_meta_test_number) return "sandbox";
     return "connected";
   }
 
@@ -218,7 +217,15 @@ export function getDashboardStatus(waAccount) {
     return "action_required";
   }
 
-  return verification_status === "verified" ? "connected" : "not_connected";
+  if (meta_wa_status === "pending" || verification_status === "pending") {
+    return "registration_pending";
+  }
+
+  if (is_meta_test_number) {
+    return "test_number";
+  }
+
+  return "not_connected";
 }
 
 /**
