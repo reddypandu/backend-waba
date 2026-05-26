@@ -24,6 +24,10 @@ import {
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
+const legacyUserIdFilter = (userId) => ({
+  $expr: { $eq: [{ $toString: "$user_id" }, String(userId)] },
+});
+
 const extractCloudinaryPublicId = (url) => {
   if (!url || typeof url !== "string" || !url.includes("cloudinary.com")) {
     return null;
@@ -88,9 +92,9 @@ router.get("/me", requireAuth, async (req, res) => {
     let waAccount = await WhatsAppAccount.findOne({ user_id: userId });
     const business = await Business.findOne({ user_id: userId });
     const [contactCount, campaignCount, templateCount] = await Promise.all([
-      Contact.countDocuments({ user_id: userId }),
-      Campaign.countDocuments({ user_id: userId }),
-      Template.countDocuments({ user_id: userId }),
+      Contact.countDocuments(legacyUserIdFilter(userId)),
+      Campaign.countDocuments(legacyUserIdFilter(userId)),
+      Template.countDocuments(legacyUserIdFilter(userId)),
     ]);
     const transactions = await WalletTransaction.find({ user_id: userId })
       .sort({ createdAt: -1 })
@@ -103,7 +107,7 @@ router.get("/me", requireAuth, async (req, res) => {
       if (!was_messaging) {
         // Check if account has any messaging activity
         const msgCount = await Message.countDocuments({
-          user_id: userId,
+          ...legacyUserIdFilter(userId),
           direction: "outbound",
         });
         was_messaging = msgCount > 0;
@@ -206,12 +210,12 @@ router.get("/users/:id", requireAuth, async (req, res) => {
       inboundCount,
       outboundCount,
     ] = await Promise.all([
-      Contact.countDocuments({ user_id: targetUserId }),
-      Campaign.countDocuments({ user_id: targetUserId }),
-      Template.countDocuments({ user_id: targetUserId }),
-      Message.countDocuments({ user_id: targetUserId }),
-      Message.countDocuments({ user_id: targetUserId, direction: "inbound" }),
-      Message.countDocuments({ user_id: targetUserId, direction: "outbound" }),
+      Contact.countDocuments(legacyUserIdFilter(targetUserId)),
+      Campaign.countDocuments(legacyUserIdFilter(targetUserId)),
+      Template.countDocuments(legacyUserIdFilter(targetUserId)),
+      Message.countDocuments(legacyUserIdFilter(targetUserId)),
+      Message.countDocuments({ ...legacyUserIdFilter(targetUserId), direction: "inbound" }),
+      Message.countDocuments({ ...legacyUserIdFilter(targetUserId), direction: "outbound" }),
     ]);
     const transactions = await WalletTransaction.find({ user_id: targetUserId })
       .sort({ createdAt: -1 })

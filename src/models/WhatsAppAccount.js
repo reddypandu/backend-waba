@@ -20,6 +20,9 @@ const WhatsAppAccountSchema = new mongoose.Schema(
     // NEW: Sync status from Meta Graph API (actual WhatsApp Business status)
     // Values: 'pending', 'connected', 'failed', 'disconnected', 'action_required'
     meta_wa_status: { type: String, default: "pending" },
+    quality_rating: { type: String },
+    messaging_limit: { type: String },
+    verified_name: { type: String },
 
     // NEW: Is this a Meta temporary test/display number?
     is_meta_test_number: { type: Boolean, default: false },

@@ -8,6 +8,8 @@ const ContactSchema = new mongoose.Schema({
   tags: [{ type: String }],
   notes: { type: String },
   opted_out: { type: Boolean, default: false },
+  opt_in_status: { type: String, enum: ['pending', 'opted_in', 'opted_out'], default: 'opted_in' },
+  custom_attributes: { type: Map, of: String },
 }, { timestamps: true });
 
 ContactSchema.index({ user_id: 1, phone_number: 1 }, { unique: true });

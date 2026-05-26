@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import http from 'http';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/db.js';
+import { initSocket } from './socket.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import webhookRoutes from './routes/webhook.js';
 import razorpayRoutes from './routes/razorpay.js';
@@ -13,6 +15,10 @@ import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
 import designRoutes from './routes/designs.js';
 import uploadPersistRoutes from './routes/uploads.js';
+import contactsRoutes from './routes/contacts.js';
+import campaignsRoutes from './routes/campaigns.js';
+import teamRoutes from './routes/team.js';
+import automationRoutes from './routes/automation.js';
 import { startCampaignWorker } from './workers/campaignWorker.js';
 
 // Register Models
@@ -92,6 +98,10 @@ app.use('/api/upload', cloudinaryRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/designs', designRoutes);
 app.use('/api/uploads-persist', uploadPersistRoutes);
+app.use('/api/contacts', contactsRoutes);
+app.use('/api/campaigns', campaignsRoutes);
+app.use('/api/team', teamRoutes);
+app.use('/api/automation', automationRoutes);
 
 app.get('/', (req, res) => res.json({ message: 'Backend API is running', version: '2.0.0', db: 'MongoDB' }));
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
@@ -103,7 +113,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5005;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+initSocket(server);
+
+server.listen(PORT, () => {
   console.log(`✅ Backend running on port ${PORT}`);
   startCampaignWorker();
 });

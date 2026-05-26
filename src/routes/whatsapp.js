@@ -78,65 +78,23 @@ router.post('/upload_media', requireAuth, upload.single('file'), async (req, res
 
 
 
+import { WhatsAppController } from '../controllers/whatsappController.js';
+
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
   try {
     const { action, ...params } = req.body;
+    
+    // Intercept template sync actions to use the new controller
+    if (action === 'get_templates' || action === 'sync_templates') {
+      return await WhatsAppController.handleActions(req, res);
+    }
+    
     const userId = req.user.id;
     const waAccount = await WhatsAppAccount.findOne({ user_id: userId });
     if (!waAccount) return res.status(400).json({ error: 'WhatsApp not configured. Complete setup first.' });
 
     const { access_token, phone_number_id, waba_id } = waAccount;
-
-    if (action === 'get_templates' || action === 'sync_templates') {
-      const r = await fetch(`${META_API}/${waba_id}/message_templates?limit=100`, { headers: { Authorization: `Bearer ${access_token}` } });
-      const data = await r.json();
-      const metaTemplates = data.data || [];
-      
-      // Update local MongoDB templates with statuses from Meta
-      if (action === 'sync_templates') {
-        for (const mt of metaTemplates) {
-          
-          let cloudinaryUrl = undefined;
-          const header = mt.components?.find(c => c.type === 'HEADER');
-          if (header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(header.format)) {
-             const existing = await Template.findOne({ user_id: userId, name: mt.name });
-             // We only upload if it has NO local_url!
-             if (!existing || !existing.local_url) {
-                const exampleUrl = header.example?.header_handle?.[0] || header.example?.header_url?.[0];
-                if (exampleUrl) {
-                   try {
-                     cloudinaryUrl = await uploadToCloudinary(exampleUrl);
-                   } catch(err) {
-                     console.error(`[Sync] Failed to upload media for ${mt.name}:`, err.message);
-                   }
-                }
-             }
-          }
-          
-          const updateData = {
-                status: mt.status, 
-                category: mt.category, 
-                language: mt.language,
-                components: mt.components,
-                meta_template_id: mt.id 
-          };
-          if (cloudinaryUrl) updateData.local_url = cloudinaryUrl;
-
-          await Template.findOneAndUpdate(
-            { user_id: userId, name: mt.name },
-            { $set: updateData },
-            { upsert: true }
-          );
-        }
-      }
-      // Mark account as verified on successful sync/fetch
-      await WhatsAppAccount.findOneAndUpdate({ user_id: userId }, { verification_status: 'verified' });
-      
-      const allTemplates = await Template.find({ user_id: userId });
-      console.log(`[Sync] Found ${allTemplates.length} templates. ${allTemplates.filter(t => t.local_url).length} have local_url.`);
-      return res.json({ templates: allTemplates });
-    }
 
     if (action === 'create_template') {
       const { name, category, language, components, local_url } = params;

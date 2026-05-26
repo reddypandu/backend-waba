@@ -76,80 +76,95 @@ async function processCampaignInBackground(campaign, waAccount) {
     const finalComponents = Array.from(componentsMap.values());
     let sent = 0, failed = 0;
 
-    for (const contact of contacts) {
-      try {
-        const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            to: contact.phone_number,
-            type: 'template',
-            template: { 
-               name: template_name, 
-               language: { code: 'en' },
-               ...(finalComponents.length > 0 && { components: finalComponents })
-            } 
-          }),
-        });
-        const data = await r.json();
-        const msgId = data.messages?.[0]?.id;
-        
-        // Extract media URL for history
-        const headerComp = finalComponents.find(c => c.type === 'header');
-        const mediaUrl = headerComp?.parameters?.[0]?.image?.link || 
-                          headerComp?.parameters?.[0]?.video?.link || 
-                          headerComp?.parameters?.[0]?.document?.link;
+    // Rate limiting: Meta allows ~50-80 msgs/sec per number. We'll be safe with 50.
+    const BATCH_SIZE = 50;
+    const DELAY_MS = 1000;
 
-        // 1. Ensure Conversation exists and is updated
-        const conversation = await Conversation.findOneAndUpdate(
-          { user_id: campaign.user_id, contact_id: contact._id },
-          { 
-            $set: { 
-              phone_number: contact.phone_number, 
-              last_message: `[Template: ${template_name}]`, 
-              last_message_at: new Date(), 
-              status: 'open' 
-            } 
-          },
-          { upsert: true, returnDocument: 'after' }
-        );
-
-        if (r.ok) {
-          sent++;
-          await Message.create({
-            user_id: campaign.user_id,
-            conversation_id: conversation?._id,
-            contact_id: contact._id,
-            campaign_id: campaign._id,
-            direction: 'outbound',
-            message_type: 'template',
-            template_name,
-            content: `[Template: ${template_name}]`,
-            media_url: mediaUrl,
-            phone_number: contact.phone_number,
-            whatsapp_message_id: msgId,
-            status: 'sent',
-            requires_follow_up
+    for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
+      const batch = contacts.slice(i, i + BATCH_SIZE);
+      
+      const batchPromises = batch.map(async (contact) => {
+        try {
+          const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              to: contact.phone_number,
+              type: 'template',
+              template: { 
+                 name: template_name, 
+                 language: { code: 'en' },
+                 ...(finalComponents.length > 0 && { components: finalComponents })
+              } 
+            }),
           });
-        } else {
+          const data = await r.json();
+          const msgId = data.messages?.[0]?.id;
+          
+          // Extract media URL for history
+          const headerComp = finalComponents.find(c => c.type === 'header');
+          const mediaUrl = headerComp?.parameters?.[0]?.image?.link || 
+                            headerComp?.parameters?.[0]?.video?.link || 
+                            headerComp?.parameters?.[0]?.document?.link;
+  
+          // 1. Ensure Conversation exists and is updated
+          const conversation = await Conversation.findOneAndUpdate(
+            { user_id: campaign.user_id, contact_id: contact._id },
+            { 
+              $set: { 
+                phone_number: contact.phone_number, 
+                last_message: `[Template: ${template_name}]`, 
+                last_message_at: new Date(), 
+                status: 'open' 
+              } 
+            },
+            { upsert: true, returnDocument: 'after' }
+          );
+  
+          if (r.ok) {
+            sent++;
+            await Message.create({
+              user_id: campaign.user_id,
+              conversation_id: conversation?._id,
+              contact_id: contact._id,
+              campaign_id: campaign._id,
+              direction: 'outbound',
+              message_type: 'template',
+              template_name,
+              content: `[Template: ${template_name}]`,
+              media_url: mediaUrl,
+              phone_number: contact.phone_number,
+              whatsapp_message_id: msgId,
+              status: 'sent',
+              requires_follow_up
+            });
+          } else {
+            failed++;
+            await Message.create({
+              user_id: campaign.user_id,
+              conversation_id: conversation?._id,
+              contact_id: contact._id,
+              campaign_id: campaign._id,
+              direction: 'outbound',
+              message_type: 'template',
+              template_name,
+              content: `[Failed Template: ${template_name}]`,
+              phone_number: contact.phone_number,
+              status: 'failed',
+              error_details: data.error?.message || 'Meta API Error'
+            });
+          }
+        } catch (e) {
           failed++;
-          await Message.create({
-            user_id: campaign.user_id,
-            conversation_id: conversation?._id,
-            contact_id: contact._id,
-            campaign_id: campaign._id,
-            direction: 'outbound',
-            message_type: 'template',
-            template_name,
-            content: `[Failed Template: ${template_name}]`,
-            phone_number: contact.phone_number,
-            status: 'failed',
-            error_details: data.error?.message || 'Meta API Error'
-          });
         }
-      } catch (e) {
-        failed++;
+      });
+      
+      await Promise.allSettled(batchPromises);
+      
+      // Delay before next batch if we have more contacts to process
+      if (i + BATCH_SIZE < contacts.length) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
       }
     }
 

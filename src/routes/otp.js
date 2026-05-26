@@ -12,6 +12,8 @@ const META_API = "https://graph.facebook.com/v24.0";
 const APP_ID = process.env.META_APP_ID;
 const APP_SECRET = process.env.META_APP_SECRET;
 
+import { WhatsAppController } from "../controllers/whatsappController.js";
+
 router.post("/", requireAuth, async (req, res) => {
   try {
     const { action, ...params } = req.body;
@@ -21,157 +23,10 @@ router.post("/", requireAuth, async (req, res) => {
       case "get_app_id":
         return res.json({ app_id: APP_ID });
 
-      case "exchange_token": {
-        const { code, waba_id, phone_number_id } = params;
-        if (!code) return res.status(400).json({ error: "Code is required" });
-
-        // 1. Exchange code for short-lived token
-        const tokenRes = await fetch(
-          `${META_API}/oauth/access_token?client_id=${APP_ID}&client_secret=${APP_SECRET}&code=${code}`,
-        );
-        const tokenData = await tokenRes.json();
-        if (!tokenRes.ok)
-          throw new Error(
-            `Token exchange failed: ${JSON.stringify(tokenData)}`,
-          );
-
-        // 2. Exchange for long-lived token
-        const llRes = await fetch(
-          `${META_API}/oauth/access_token?grant_type=fb_exchange_token&client_id=${APP_ID}&client_secret=${APP_SECRET}&fb_exchange_token=${tokenData.access_token}`,
-        );
-        const llData = await llRes.json();
-        if (!llRes.ok)
-          throw new Error(`Long-lived token failed: ${JSON.stringify(llData)}`);
-        const accessToken = llData.access_token;
-
-        // 3. Get WABA info
-        let metaBusinessId = null;
-        try {
-          const bizRes = await fetch(`${META_API}/${waba_id}?fields=id,name`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          });
-          const bizData = await bizRes.json();
-          metaBusinessId = bizData?.id;
-        } catch (_) {}
-
-        // 4. Upsert business
-        const biz = await Business.findOneAndUpdate(
-          { user_id: userId },
-          {
-            $set: {
-              meta_business_id: metaBusinessId,
-              meta_verification_status: "verified",
-            },
-            $setOnInsert: { user_id: userId, name: "My Business" },
-          },
-          { upsert: true, new: true },
-        );
-
-        // 5. Resolve phone number
-        let phoneNumber = null;
-        if (phone_number_id) {
-          try {
-            const pRes = await fetch(
-              `${META_API}/${phone_number_id}?fields=display_phone_number`,
-              { headers: { Authorization: `Bearer ${accessToken}` } },
-            );
-            const pData = await pRes.json();
-            phoneNumber = pData?.display_phone_number;
-          } catch (_) {}
-        }
-
-        // 6. Upsert WhatsApp account
-        const waAccount = await WhatsAppAccount.findOneAndUpdate(
-          { user_id: userId },
-          {
-            phone_number_id,
-            waba_id,
-            access_token: accessToken,
-            phone_number: phoneNumber,
-            business_id: biz._id,
-            webhook_verified: true,
-          },
-          { upsert: true, new: true },
-        );
-
-        // 7. SAFE: Sync actual Meta status (NEW - identifies test numbers, messaging activity, etc.)
-        try {
-          const syncResult = await syncAccountStatusFromMeta(waAccount);
-          await updateAccountWithMetaStatus(waAccount, syncResult);
-          console.log(
-            `[OAuth Register] Account ${phone_number_id} status synced: ${syncResult.metaStatus}, IsTest: ${syncResult.isTestNumber}`,
-          );
-
-          if (syncResult.shouldRegister) {
-            try {
-              console.log(`[OAuth Register] Auto-registering phone number ${phone_number_id}...`);
-              const registerRes = await fetch(
-                `${META_API}/${phone_number_id}/register`,
-                {
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${accessToken}`,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({
-                    messaging_product: "whatsapp",
-                    pin: process.env.WHATSAPP_PHONE_PIN || "123456",
-                  }),
-                }
-              );
-
-              if (registerRes.ok) {
-                await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
-                  $set: {
-                    verification_status: "verified",
-                    meta_wa_status: "connected",
-                    registration_error: null,
-                  },
-                  $inc: { registration_attempt_count: 1 },
-                  $currentDate: { last_registration_attempt: true }
-                });
-                console.log(`[OAuth Register] Auto-registration successful for ${phone_number_id}`);
-              } else {
-                const regErrData = await registerRes.json();
-                console.warn(`[OAuth Register] Auto-registration failed:`, regErrData);
-                await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
-                  $set: { registration_error: regErrData.error?.message || "Registration failed" },
-                  $inc: { registration_attempt_count: 1 },
-                  $currentDate: { last_registration_attempt: true }
-                });
-              }
-            } catch (regErr) {
-               console.error(`[OAuth Register] Auto-registration network error:`, regErr.message);
-               await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
-                 $set: { registration_error: regErr.message },
-                 $inc: { registration_attempt_count: 1 },
-                 $currentDate: { last_registration_attempt: true }
-               });
-            }
-          }
-        } catch (syncErr) {
-          console.warn(
-            `[OAuth Register] Status sync failed (non-fatal):`,
-            syncErr.message,
-          );
-          // Don't fail registration if sync fails - account is still connected
-        }
-
-        // 8. Auto-subscribe WABA to webhooks
-        try {
-          await fetch(`${META_API}/${waba_id}/subscribed_apps`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${accessToken}` },
-          });
-        } catch (_) {}
-
-        return res.json({
-          success: true,
-          message: "WhatsApp account connected successfully",
-          phone_number: phoneNumber,
-          note: "Status sync complete. Check dashboard for actual Meta status.",
-        });
-      }
+      case "exchange_token":
+        // Fallback or map the params to body for controller
+        req.body = params;
+        return await WhatsAppController.connectAccount(req, res);
 
       default:
         return res.status(400).json({ error: "Unknown action" });

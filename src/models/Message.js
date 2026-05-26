@@ -14,6 +14,8 @@ const MessageSchema = new mongoose.Schema({
   phone_number: { type: String },
   whatsapp_message_id: { type: String, unique: true, sparse: true },
   status: { type: String, enum: ['queued', 'sent', 'delivered', 'read', 'failed', 'replied'], default: 'queued' },
+  delivered_at: { type: Date },
+  read_at: { type: Date },
   error_details: { type: String },
   requires_follow_up: { type: Boolean, default: false }, // From Sample App: Mark message for follow-up on read/delivered
 }, { timestamps: true });
