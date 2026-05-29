@@ -15,6 +15,7 @@ import WalletTransaction from "../models/WalletTransaction.js";
 import Design from "../models/Design.js";
 import { cloudinary } from "../services/cloudinary.js";
 import {
+  attemptRegistrationIfNeeded,
   syncAccountStatusFromMeta,
   updateAccountWithMetaStatus,
   getDashboardStatus,
@@ -714,39 +715,13 @@ router.post("/whatsapp-accounts", requireAuth, async (req, res) => {
     );
 
     try {
-      const syncResult = await syncAccountStatusFromMeta(wa);
-      await updateAccountWithMetaStatus(wa, syncResult);
-      if (syncResult.shouldRegister) {
-        console.log(`[Manual Setup] Auto-registering phone number ${phone_number_id}...`);
-        const registerRes = await fetch(
-          `https://graph.facebook.com/v24.0/${phone_number_id}/register`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${access_token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              messaging_product: "whatsapp",
-              pin: process.env.WHATSAPP_PHONE_PIN || "123456",
-            }),
-          }
-        );
-        if (registerRes.ok) {
-          await WhatsAppAccount.findByIdAndUpdate(wa._id, {
-            $set: { verification_status: "verified", meta_wa_status: "connected", registration_error: null },
-            $inc: { registration_attempt_count: 1 },
-            $currentDate: { last_registration_attempt: true }
-          });
-        } else {
-          const regErrData = await registerRes.json();
-          await WhatsAppAccount.findByIdAndUpdate(wa._id, {
-            $set: { registration_error: regErrData.error?.message || "Registration failed" },
-            $inc: { registration_attempt_count: 1 },
-            $currentDate: { last_registration_attempt: true }
-          });
-        }
-      }
+      const registrationResult = await attemptRegistrationIfNeeded(wa);
+      console.log("[Manual Setup] Registration evaluation result:", {
+        status: registrationResult.status,
+        attempted: registrationResult.attempted,
+        success: registrationResult.success,
+        dashboard_status: registrationResult.dashboard_status,
+      });
     } catch (syncErr) {
       console.warn(`[Manual Setup] Status sync/register failed:`, syncErr.message);
     }
@@ -1020,7 +995,7 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
     const updated = await updateAccountWithMetaStatus(waAccount, syncResult);
 
     // Get dashboard-friendly status
-    const dashboardStatus = getDashboardStatus(updated);
+    const dashboardStatus = getDashboardStatus(updated || waAccount);
 
     res.json({
       success: true,
@@ -1032,6 +1007,10 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
       was_messaging: syncResult.isMessaging,
       dashboard_status: dashboardStatus,
       should_register: syncResult.shouldRegister,
+      registration_state: syncResult.registrationState,
+      registration_error: updated?.registration_error || waAccount.registration_error,
+      registration_attempt_count:
+        updated?.registration_attempt_count || waAccount.registration_attempt_count || 0,
       last_synced: syncResult.timestamp,
       message: syncResult.shouldRegister
         ? "Phone number needs registration. Call /register API to complete setup."
@@ -1098,6 +1077,9 @@ router.get("/whatsapp-status", requireAuth, async (req, res) => {
       is_meta_test_number: waAccount.is_meta_test_number || false,
       was_messaging: was_messaging,
       dashboard_status: dashboardStatus,
+      registration_error: waAccount.registration_error,
+      registration_attempt_count: waAccount.registration_attempt_count || 0,
+      last_registration_attempt: waAccount.last_registration_attempt,
       meta_status_last_synced: waAccount.meta_status_last_synced,
       created_at: waAccount.createdAt,
       updated_at: waAccount.updatedAt,
@@ -1137,86 +1119,19 @@ router.post("/whatsapp-register", requireAuth, async (req, res) => {
         .json({ error: "Access token missing. Please reconnect." });
     }
 
-    // Sync latest status from Meta
-    const syncResult = await syncAccountStatusFromMeta(waAccount);
-    const updated = await updateAccountWithMetaStatus(waAccount, syncResult);
+    const result = await attemptRegistrationIfNeeded(waAccount, { force });
+    const statusCode = result.success || !result.attempted ? 200 : 400;
 
-    // SAFETY CHECKS
-    if (!force) {
-      if (syncResult.isMessaging) {
-        return res.json({
-          success: false,
-          reason: "already_messaging",
-          message:
-            "Account already has messaging activity. No re-registration needed.",
-          was_messaging: true,
-        });
-      }
-
-      if (syncResult.metaStatus === "connected") {
-        return res.json({
-          success: false,
-          reason: "already_connected",
-          message: "Account is already connected to Meta WhatsApp.",
-          meta_wa_status: "connected",
-        });
-      }
-
-      if (!syncResult.shouldRegister) {
-        return res.json({
-          success: false,
-          reason: "cannot_register",
-          message: `Cannot register: current status is "${syncResult.metaStatus}". Contact Meta support.`,
-          meta_wa_status: syncResult.metaStatus,
-        });
-      }
-    }
-
-    // Attempt registration via Meta API
-    try {
-      const META_API = "https://graph.facebook.com/v24.0";
-      const registerRes = await fetch(
-        `${META_API}/${waAccount.phone_number_id}/register`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${waAccount.access_token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            pin: process.env.WHATSAPP_PHONE_PIN || "123456",
-          }),
-        },
-      );
-
-      const data = await registerRes.json();
-
-      if (!registerRes.ok) {
-        throw new Error(data.error?.message || "Meta registration API error");
-      }
-
-      // Mark as verified after successful registration
-      await WhatsAppAccount.findByIdAndUpdate(waAccount._id, {
-        $set: {
-          verification_status: "verified",
-          meta_wa_status: "connected",
-        },
-      });
-
-      res.json({
-        success: true,
-        message: "Phone number registration initiated with Meta.",
-        meta_response: data,
-      });
-    } catch (metaErr) {
-      console.error("[Register] Meta API error:", metaErr.message);
-      res.status(400).json({
-        success: false,
-        error: metaErr.message,
-        hint: "Please contact your Meta partner or check the phone number status in Meta WhatsApp Manager.",
-      });
-    }
+    res.status(statusCode).json({
+      success: result.success,
+      attempted: result.attempted,
+      status: result.status,
+      dashboard_status: result.dashboard_status,
+      message: result.message,
+      error: result.error,
+      timeout: result.timeout || false,
+      meta_response: result.meta_response,
+    });
   } catch (err) {
     console.error("[Register] Error:", err);
     res.status(500).json({ error: err.message });

@@ -105,6 +105,10 @@ router.post("/retry-register", requireAuth, async (req, res) => {
   return await WhatsAppController.retryRegistration(req, res);
 });
 
+router.post("/retry-register/:id", requireAuth, async (req, res) => {
+  return await WhatsAppController.retryRegistration(req, res);
+});
+
 // ── WhatsApp Actions (templates, send, contacts) ─────────────────────────────
 router.post("/", requireAuth, async (req, res) => {
   try {
