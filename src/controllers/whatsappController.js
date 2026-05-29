@@ -57,6 +57,17 @@ export class WhatsAppController {
         phone_number_id: resolvedPhoneNumberId,
       });
 
+      const tokenInfo = await MetaApiService.verifyToken(accessToken);
+      const requiredScopes = ["whatsapp_business_management", "whatsapp_business_messaging", "business_management"];
+      const hasScopes = requiredScopes.every(scope => tokenInfo.scopes.includes(scope));
+      console.log("[OAuth Connect] Token Verification", {
+        is_valid: tokenInfo.valid,
+        has_required_scopes: hasScopes,
+        scopes: tokenInfo.scopes,
+        belongs_to_business: !!resolvedBusinessId
+      });
+
+
       const phoneData =
         resolvedPhone ||
         (await MetaApiService.getPhoneNumber(resolvedPhoneNumberId, accessToken));
@@ -115,7 +126,7 @@ export class WhatsAppController {
         phone_number_id: waAccount.phone_number_id,
       });
 
-      const registrationResult = await attemptRegistrationIfNeeded(waAccount);
+      const registrationResult = await attemptRegistrationIfNeeded(waAccount, { force: true });
       console.log("[OAuth Connect] Registration evaluation result", {
         status: registrationResult.status,
         attempted: registrationResult.attempted,

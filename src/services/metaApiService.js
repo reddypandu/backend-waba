@@ -46,6 +46,22 @@ export class MetaApiService {
     return llRes.data.access_token;
   }
 
+  static async verifyToken(accessToken) {
+    const appToken = `${APP_ID}|${APP_SECRET}`;
+    const url = `${META_API}/debug_token?input_token=${accessToken}&access_token=${appToken}`;
+    const res = await withTimeout(url);
+    if (!res.ok) {
+      console.warn("[Token Verify] Failed to verify token:", res.data);
+      return { valid: false, scopes: [] };
+    }
+    return {
+      valid: res.data?.data?.is_valid || false,
+      scopes: res.data?.data?.scopes || [],
+      granular_scopes: res.data?.data?.granular_scopes || [],
+      error: res.data?.data?.error || null,
+    };
+  }
+
   static async graphGet(path, accessToken, timeoutMs) {
     return withTimeout(
       `${META_API}/${path.replace(/^\//, "")}`,

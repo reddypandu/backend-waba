@@ -7,14 +7,17 @@ const TEST_NUMBER_RE = /(^\+?1?555|^\+?1234567890|test|sandbox|display)/i;
 const metaErrorMessage = (result, fallback = "Meta API error") =>
   result?.data?.error?.message || result?.error || fallback;
 
-const classifyPhoneStatus = (phoneData, profileResult, isMessaging) => {
+const classifyPhoneStatus = (phoneData, profileResult, isMessaging, dbStatus) => {
   if (isMessaging) return "connected";
-  if (profileResult?.ok) return "connected";
-
-  const codeStatus = String(phoneData?.code_verification_status || "").toUpperCase();
-  if (["VERIFIED", "APPROVED", "CONNECTED"].includes(codeStatus)) {
+  
+  // If the database already knows it's connected, and it's not disconnected from Meta, keep it connected.
+  if (dbStatus === "connected" && profileResult?.status !== 404 && ![400, 401, 403].includes(profileResult?.status)) {
     return "connected";
   }
+
+  // code_verification_status === "VERIFIED" only means OTP is verified.
+  // We must not return "connected" here unless it's already connected in DB,
+  // so that the registration API will be called for new signups.
 
   if ([400, 401, 403].includes(profileResult?.status)) {
     return "action_required";
@@ -99,7 +102,7 @@ export async function syncAccountStatusFromMeta(waAccount) {
       });
     }
 
-    const metaStatus = classifyPhoneStatus(phoneData, profileResult, isMessaging);
+    const metaStatus = classifyPhoneStatus(phoneData, profileResult, isMessaging, waAccount.meta_wa_status);
     const canAttemptRegistration =
       ["pending", "action_required"].includes(metaStatus) &&
       registration_attempt_count < 5;
@@ -218,7 +221,6 @@ export function getDashboardStatus(waAccount) {
     return is_meta_test_number ? "test_number" : "connected";
   }
 
-  if (is_meta_test_number && registration_error) return "test_number_pending";
   if (is_meta_test_number) return "test_number";
   if (registration_error || meta_wa_status === "failed") return "registration_failed";
   if (meta_wa_status === "action_required" || meta_wa_status === "error") return "action_required";
@@ -267,15 +269,15 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
   const errorMsg = metaErrorMessage(regRes, "Registration failed");
   const testNumberRejected = syncResult.isTestNumber && !regRes.ok;
 
-  if (regRes.ok) {
+  if (regRes.ok || testNumberRejected) {
     updated = await WhatsAppAccount.findByIdAndUpdate(
       waAccount._id,
       {
         $set: {
           verification_status: "verified",
           meta_wa_status: "connected",
-          registration_error: null,
-          meta_error_message: null,
+          registration_error: testNumberRejected ? errorMsg : null,
+          meta_error_message: testNumberRejected ? errorMsg : null,
         },
         $inc: { registration_attempt_count: 1 },
         $currentDate: { last_registration_attempt: true },
@@ -291,7 +293,7 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
       syncResult,
       meta_response: regRes.data,
       account: updated,
-      message: "Phone number registered successfully.",
+      message: testNumberRejected ? "Test number configured successfully." : "Phone number registered successfully.",
     };
   }
 
@@ -301,8 +303,8 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
       $set: {
         registration_error: errorMsg,
         meta_error_message: errorMsg,
-        meta_wa_status: testNumberRejected ? "pending" : "action_required",
-        verification_status: testNumberRejected ? "pending" : "failed",
+        meta_wa_status: "action_required",
+        verification_status: "failed",
       },
       $inc: { registration_attempt_count: 1 },
       $currentDate: { last_registration_attempt: true },
@@ -313,13 +315,13 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
   return {
     attempted: true,
     success: false,
-    status: testNumberRejected ? "test_number_pending" : "registration_failed",
+    status: "registration_failed",
     dashboard_status: getDashboardStatus(updated),
     syncResult,
     meta_response: regRes.data,
     account: updated,
     error: errorMsg,
-    message: testNumberRejected ? "Test Number Pending" : errorMsg,
+    message: errorMsg,
     timeout: regRes.timeout || false,
   };
 }
