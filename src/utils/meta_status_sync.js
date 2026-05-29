@@ -90,7 +90,29 @@ export async function syncAccountStatusFromMeta(waAccount) {
     // 2. Check if already messaging
     const isMessaging = await hasMessagingActivity(user_id);
 
-    // 3. Fetch current status from Meta
+    // 3. Refresh phone number metadata from Meta
+    let phoneData = null;
+    try {
+      const phoneRes = await fetch(
+        `${META_API}/${phone_number_id}?fields=display_phone_number,quality_rating,name`,
+        { headers: { Authorization: `Bearer ${access_token}` } },
+      );
+
+      if (phoneRes.ok) {
+        phoneData = await phoneRes.json();
+      } else {
+        console.warn(
+          `[Meta Status] Could not fetch phone number details: ${phoneRes.status}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "[Meta Status] Could not refresh phone number details:",
+        err.message,
+      );
+    }
+
+    // 4. Fetch current status from Meta
     let metaStatus = "pending";
     try {
       const profileRes = await fetch(
@@ -131,6 +153,9 @@ export async function syncAccountStatusFromMeta(waAccount) {
       isTestNumber: isTest,
       isMessaging,
       shouldRegister,
+      displayPhoneNumber: phoneData?.display_phone_number,
+      qualityRating: phoneData?.quality_rating,
+      verifiedName: phoneData?.name,
       timestamp: new Date(),
     };
   } catch (err) {
@@ -158,6 +183,18 @@ export async function updateAccountWithMetaStatus(waAccount, syncResult) {
       was_messaging: syncResult.isMessaging,
       meta_status_last_synced: syncResult.timestamp,
     };
+
+    if (syncResult.displayPhoneNumber) {
+      updateData.phone_number = syncResult.displayPhoneNumber;
+    }
+
+    if (syncResult.qualityRating) {
+      updateData.quality_rating = syncResult.qualityRating;
+    }
+
+    if (syncResult.verifiedName) {
+      updateData.verified_name = syncResult.verifiedName;
+    }
 
     // Update verification_status safely
     if (syncResult.metaStatus === "connected") {

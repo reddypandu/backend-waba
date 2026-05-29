@@ -1024,8 +1024,9 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
 
     res.json({
       success: true,
-      phone_number: waAccount.phone_number,
-      phone_number_id: waAccount.phone_number_id,
+      phone_number: updated?.phone_number || waAccount.phone_number,
+      phone_number_id: updated?.phone_number_id || waAccount.phone_number_id,
+      waba_id: updated?.waba_id || waAccount.waba_id,
       meta_wa_status: syncResult.metaStatus,
       is_meta_test_number: syncResult.isTestNumber,
       was_messaging: syncResult.isMessaging,
