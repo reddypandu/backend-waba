@@ -1,17 +1,50 @@
 import WhatsAppAccount from "../models/WhatsAppAccount.js";
 import Message from "../models/Message.js";
-import { MetaApiService } from "../services/metaApiService.js";
+import {
+  getMetaRetryAfterSeconds,
+  isMetaRateLimitError,
+  MetaApiService,
+} from "../services/metaApiService.js";
 
 const TEST_NUMBER_RE = /(^\+?1?555|^\+?1234567890|test|sandbox|display)/i;
+const REGISTRATION_RETRY_COOLDOWN_MS = 90 * 1000;
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_REGISTRATION_ATTEMPTS = 5;
 
 const metaErrorMessage = (result, fallback = "Meta API error") =>
   result?.data?.error?.message || result?.error || fallback;
 
-const classifyPhoneStatus = (phoneData, profileResult, isMessaging, dbStatus) => {
+const secondsUntil = (date) =>
+  Math.max(0, Math.ceil((new Date(date).getTime() - Date.now()) / 1000));
+
+const getRegistrationCooldown = (waAccount) => {
+  if (!waAccount?.last_registration_attempt) return null;
+  const nextAllowedAt = new Date(
+    new Date(waAccount.last_registration_attempt).getTime() +
+      REGISTRATION_RETRY_COOLDOWN_MS,
+  );
+
+  if (nextAllowedAt.getTime() <= Date.now()) return null;
+  return {
+    nextAllowedAt,
+    retryAfterSeconds: secondsUntil(nextAllowedAt),
+  };
+};
+
+const classifyPhoneStatus = (
+  phoneData,
+  profileResult,
+  isMessaging,
+  dbStatus,
+) => {
   if (isMessaging) return "connected";
-  
+
   // If the database already knows it's connected, and it's not disconnected from Meta, keep it connected.
-  if (dbStatus === "connected" && profileResult?.status !== 404 && ![400, 401, 403].includes(profileResult?.status)) {
+  if (
+    dbStatus === "connected" &&
+    profileResult?.status !== 404 &&
+    ![400, 401, 403].includes(profileResult?.status)
+  ) {
     return "connected";
   }
 
@@ -27,12 +60,20 @@ const classifyPhoneStatus = (phoneData, profileResult, isMessaging, dbStatus) =>
   return "pending";
 };
 
-export async function isMetaTestNumber(phoneNumberId, accessToken, phoneData = null) {
+export async function isMetaTestNumber(
+  phoneNumberId,
+  accessToken,
+  phoneData = null,
+) {
   try {
-    const data = phoneData || (await MetaApiService.getPhoneNumber(phoneNumberId, accessToken));
+    const data =
+      phoneData ||
+      (await MetaApiService.getPhoneNumber(phoneNumberId, accessToken));
     const displayNumber = data?.display_phone_number || "";
     const verifiedName = data?.verified_name || data?.name || "";
-    const isTestPattern = TEST_NUMBER_RE.test(`${displayNumber} ${verifiedName}`);
+    const isTestPattern = TEST_NUMBER_RE.test(
+      `${displayNumber} ${verifiedName}`,
+    );
 
     console.log("[Meta Status] Test number check", {
       phone_number_id: phoneNumberId,
@@ -64,7 +105,10 @@ export async function hasMessagingActivity(userId) {
     });
     return msgCount > 0;
   } catch (err) {
-    console.error("[Meta Status] Error checking messaging activity:", err.message);
+    console.error(
+      "[Meta Status] Error checking messaging activity:",
+      err.message,
+    );
     return false;
   }
 }
@@ -87,8 +131,15 @@ export async function syncAccountStatusFromMeta(waAccount) {
 
   try {
     const isMessaging = await hasMessagingActivity(user_id);
-    const phoneData = await MetaApiService.getPhoneNumber(phone_number_id, access_token);
-    const isTest = await isMetaTestNumber(phone_number_id, access_token, phoneData);
+    const phoneData = await MetaApiService.getPhoneNumber(
+      phone_number_id,
+      access_token,
+    );
+    const isTest = await isMetaTestNumber(
+      phone_number_id,
+      access_token,
+      phoneData,
+    );
     const profileResult = await MetaApiService.getBusinessProfile(
       phone_number_id,
       access_token,
@@ -102,15 +153,18 @@ export async function syncAccountStatusFromMeta(waAccount) {
       });
     }
 
-    const metaStatus = classifyPhoneStatus(phoneData, profileResult, isMessaging, waAccount.meta_wa_status);
+    const metaStatus = classifyPhoneStatus(
+      phoneData,
+      profileResult,
+      isMessaging,
+      waAccount.meta_wa_status,
+    );
     const canAttemptRegistration =
       ["pending", "action_required"].includes(metaStatus) &&
-      registration_attempt_count < 5;
+      registration_attempt_count < MAX_REGISTRATION_ATTEMPTS;
 
     const shouldRegister =
-      !isMessaging &&
-      metaStatus !== "connected" &&
-      canAttemptRegistration;
+      !isMessaging && metaStatus !== "connected" && canAttemptRegistration;
 
     const registrationState = isMessaging
       ? "already_registered"
@@ -143,6 +197,7 @@ export async function syncAccountStatusFromMeta(waAccount) {
       business_id: waAccount.business_id || null,
       waba_id,
       phone_number_id,
+      display_phone_number: phoneData?.display_phone_number,
       meta_status: result.metaStatus,
       registration_state: result.registrationState,
       is_test_number: result.isTestNumber,
@@ -153,6 +208,26 @@ export async function syncAccountStatusFromMeta(waAccount) {
     return result;
   } catch (err) {
     console.error("[Meta Status Sync] Critical error:", err.message);
+    if (err.rateLimited || isMetaRateLimitError(err)) {
+      const retryAfterSeconds =
+        err.retryAfterSeconds || getMetaRetryAfterSeconds(err, 300);
+      const cooldownUntil = new Date(Date.now() + retryAfterSeconds * 1000);
+      return {
+        metaStatus: waAccount.meta_wa_status || "pending",
+        registrationState: "cooldown",
+        isTestNumber: waAccount.is_meta_test_number || false,
+        isMessaging: waAccount.was_messaging || false,
+        shouldRegister: false,
+        canAttemptRegistration: false,
+        rateLimited: true,
+        retryAfterSeconds,
+        cooldownUntil,
+        error:
+          "Meta API rate limit reached. Please wait before checking status again.",
+        timestamp: new Date(),
+      };
+    }
+
     return {
       metaStatus: "error",
       registrationState: "action_required",
@@ -169,21 +244,34 @@ export async function syncAccountStatusFromMeta(waAccount) {
 export async function updateAccountWithMetaStatus(waAccount, syncResult) {
   try {
     const updateData = {
-      meta_wa_status: syncResult.metaStatus,
       is_meta_test_number: syncResult.isTestNumber,
       was_messaging: syncResult.isMessaging,
       meta_status_last_synced: syncResult.timestamp,
       meta_error_message: syncResult.error || syncResult.profileError || null,
     };
 
-    if (syncResult.displayPhoneNumber) updateData.phone_number = syncResult.displayPhoneNumber;
-    if (syncResult.qualityRating) updateData.quality_rating = syncResult.qualityRating;
-    if (syncResult.verifiedName) updateData.verified_name = syncResult.verifiedName;
+    if (!syncResult.rateLimited) {
+      updateData.meta_wa_status = syncResult.metaStatus;
+    }
+
+    // Only update phone_number if we have actual display_phone_number from Meta API
+    // Don't fallback to phone_number_id as that's not a real phone number
+    if (syncResult.displayPhoneNumber) {
+      updateData.phone_number = syncResult.displayPhoneNumber;
+    }
+
+    if (syncResult.qualityRating)
+      updateData.quality_rating = syncResult.qualityRating;
+    if (syncResult.verifiedName)
+      updateData.verified_name = syncResult.verifiedName;
 
     if (syncResult.metaStatus === "connected" || syncResult.isMessaging) {
       updateData.verification_status = "verified";
       updateData.registration_error = null;
-    } else if (!waAccount.was_messaging && waAccount.verification_status !== "verified") {
+    } else if (
+      !waAccount.was_messaging &&
+      waAccount.verification_status !== "verified"
+    ) {
       updateData.verification_status =
         syncResult.registrationState === "registration_failed"
           ? "failed"
@@ -217,13 +305,19 @@ export function getDashboardStatus(waAccount) {
     registration_error,
   } = waAccount || {};
 
-  if (meta_wa_status === "connected" || was_messaging || verification_status === "verified") {
+  if (
+    meta_wa_status === "connected" ||
+    was_messaging ||
+    verification_status === "verified"
+  ) {
     return is_meta_test_number ? "test_number" : "connected";
   }
 
   if (is_meta_test_number) return "test_number";
-  if (registration_error || meta_wa_status === "failed") return "registration_failed";
-  if (meta_wa_status === "action_required" || meta_wa_status === "error") return "action_required";
+  if (registration_error || meta_wa_status === "failed")
+    return "registration_failed";
+  if (meta_wa_status === "action_required" || meta_wa_status === "error")
+    return "action_required";
   if (meta_wa_status === "pending" || verification_status === "pending") {
     return "registration_pending";
   }
@@ -232,8 +326,56 @@ export function getDashboardStatus(waAccount) {
 }
 
 export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
+  if ((waAccount.registration_attempt_count || 0) >= MAX_REGISTRATION_ATTEMPTS) {
+    return {
+      attempted: false,
+      success: false,
+      status: "registration_failed",
+      dashboard_status: getDashboardStatus(waAccount),
+      account: waAccount,
+      error:
+        "Registration retry limit reached. Please reconnect the WhatsApp account or contact support.",
+      message:
+        "Registration retry limit reached. Please reconnect the WhatsApp account or contact support.",
+      retry_stopped: true,
+    };
+  }
+
+  const cooldown = getRegistrationCooldown(waAccount);
+  if (cooldown) {
+    return {
+      attempted: false,
+      success: false,
+      status: "cooldown",
+      dashboard_status: getDashboardStatus(waAccount),
+      account: waAccount,
+      cooldown: true,
+      retry_after_seconds: cooldown.retryAfterSeconds,
+      retry_after: cooldown.nextAllowedAt,
+      error: `Please wait ${cooldown.retryAfterSeconds} seconds before retrying registration.`,
+      message: `Please wait ${cooldown.retryAfterSeconds} seconds before retrying registration.`,
+    };
+  }
+
   const syncResult = await syncAccountStatusFromMeta(waAccount);
   let updated = await updateAccountWithMetaStatus(waAccount, syncResult);
+
+  if (syncResult.rateLimited) {
+    return {
+      attempted: false,
+      success: false,
+      status: "cooldown",
+      dashboard_status: getDashboardStatus(updated || waAccount),
+      syncResult,
+      account: updated,
+      cooldown: true,
+      rate_limited: true,
+      retry_after_seconds: syncResult.retryAfterSeconds,
+      retry_after: syncResult.cooldownUntil,
+      error: syncResult.error,
+      message: syncResult.error,
+    };
+  }
 
   if (syncResult.isMessaging || syncResult.metaStatus === "connected") {
     return {
@@ -255,7 +397,9 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
       dashboard_status: getDashboardStatus(updated || waAccount),
       syncResult,
       account: updated,
-      message: syncResult.profileError || "Phone number is not ready for registration.",
+      message:
+        syncResult.profileError ||
+        "Phone number is not ready for registration.",
     };
   }
 
@@ -267,6 +411,10 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
   );
 
   const errorMsg = metaErrorMessage(regRes, "Registration failed");
+  const rateLimited = isMetaRateLimitError(regRes);
+  const retryAfterSeconds = rateLimited
+    ? getMetaRetryAfterSeconds(regRes, RATE_LIMIT_COOLDOWN_MS / 1000)
+    : null;
   const testNumberRejected = syncResult.isTestNumber && !regRes.ok;
 
   if (regRes.ok || testNumberRejected) {
@@ -293,7 +441,9 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
       syncResult,
       meta_response: regRes.data,
       account: updated,
-      message: testNumberRejected ? "Test number configured successfully." : "Phone number registered successfully.",
+      message: testNumberRejected
+        ? "Test number configured successfully."
+        : "Phone number registered successfully.",
     };
   }
 
@@ -302,7 +452,9 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
     {
       $set: {
         registration_error: errorMsg,
-        meta_error_message: errorMsg,
+        meta_error_message: rateLimited
+          ? "Meta API rate limit reached. Please wait before retrying registration."
+          : errorMsg,
         meta_wa_status: "action_required",
         verification_status: "failed",
       },
@@ -320,9 +472,19 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
     syncResult,
     meta_response: regRes.data,
     account: updated,
-    error: errorMsg,
-    message: errorMsg,
+    error: rateLimited
+      ? "Meta API rate limit reached. Please wait before retrying registration."
+      : errorMsg,
+    message: rateLimited
+      ? "Meta API rate limit reached. Please wait before retrying registration."
+      : errorMsg,
     timeout: regRes.timeout || false,
+    cooldown: rateLimited,
+    rate_limited: rateLimited,
+    retry_after_seconds: retryAfterSeconds,
+    retry_after: retryAfterSeconds
+      ? new Date(Date.now() + retryAfterSeconds * 1000)
+      : null,
   };
 }
 
@@ -341,7 +503,10 @@ export async function syncAllAccounts() {
         dashboard_status: getDashboardStatus(updated || account),
       });
     } catch (err) {
-      console.error(`Error syncing account ${account.phone_number_id}:`, err.message);
+      console.error(
+        `Error syncing account ${account.phone_number_id}:`,
+        err.message,
+      );
       results.push({
         phone_number_id: account.phone_number_id,
         success: false,

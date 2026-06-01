@@ -1,25 +1,82 @@
-import Campaign from '../models/Campaign.js';
-import Contact from '../models/Contact.js';
-import WhatsAppAccount from '../models/WhatsAppAccount.js';
-import Message from '../models/Message.js';
-import Conversation from '../models/Conversation.js';
+import Campaign from "../models/Campaign.js";
+import Contact from "../models/Contact.js";
+import WhatsAppAccount from "../models/WhatsAppAccount.js";
+import Message from "../models/Message.js";
+import Conversation from "../models/Conversation.js";
 
-const META_API = 'https://graph.facebook.com/v22.0';
+const META_API = "https://graph.facebook.com/v22.0";
+const STALE_RUNNING_MS = 2 * 60 * 1000;
+
+const normalizePhoneNumber = (value = "") => String(value).replace(/\D/g, "");
+
+const formatMetaError = (data, fallback = "Meta API Error") => {
+  const error = data?.error;
+  if (!error) return fallback;
+  // Detect specific messaging capability issues
+  const errorCode = error.code;
+  const errorSubcode = error.error_subcode;
+  let specificError = null;
+
+  if (errorCode === 131026) {
+    specificError =
+      "Account temporarily restricted. Add payment method in Meta Business Manager.";
+  } else if (errorCode === 131092) {
+    specificError =
+      "Account messaging limit exceeded or messaging capability disabled.";
+  } else if (errorCode === 550 && errorSubcode === 1104) {
+    specificError =
+      "Phone number not registered or messaging not enabled. Complete number registration in Meta.";
+  } else if (error.message?.includes("Payment")) {
+    specificError =
+      "Payment method required. Add payment method to WhatsApp Business Account.";
+  } else if (error.message?.includes("messaging")) {
+    specificError = `Messaging capability issue: ${error.message}`;
+  }
+
+  if (specificError) return specificError;
+  const parts = [
+    error.message,
+    error.code ? `code: ${error.code}` : null,
+    error.error_subcode ? `subcode: ${error.error_subcode}` : null,
+    error.error_data?.details,
+    error.fbtrace_id ? `trace: ${error.fbtrace_id}` : null,
+  ].filter(Boolean);
+
+  return parts.join(" | ") || fallback;
+};
 
 /**
  * Sends a campaign based on its current configuration
- * @param {string} campaignId 
+ * @param {string} campaignId
  */
 export async function sendCampaign(campaignId) {
   try {
     const campaign = await Campaign.findById(campaignId);
-    if (!campaign) return { error: 'Campaign not found' };
-    if (campaign.status === 'running') return { error: 'Campaign already running' };
+    if (!campaign) return { error: "Campaign not found" };
+    if (campaign.status === "running") {
+      const startedAt = campaign.started_at
+        ? new Date(campaign.started_at).getTime()
+        : 0;
+      const isStale = !startedAt || Date.now() - startedAt > STALE_RUNNING_MS;
+      const messageCount = await Message.countDocuments({
+        campaign_id: { $in: [campaign._id, campaign._id.toString()] },
+      });
 
-    const waAccount = await WhatsAppAccount.findOne({ user_id: campaign.user_id });
-    if (!waAccount) return { error: 'WhatsApp not configured' };
+      if (!isStale || messageCount > 0) {
+        return { success: true, message: "Campaign already running" };
+      }
 
-    campaign.status = 'running';
+      console.warn(
+        `[Campaign] Recovering stale running campaign with no messages: ${campaign._id}`,
+      );
+    }
+
+    const waAccount = await WhatsAppAccount.findOne({
+      user_id: campaign.user_id,
+    });
+    if (!waAccount) return { error: "WhatsApp not configured" };
+
+    campaign.status = "running";
     campaign.started_at = new Date();
     await campaign.save();
 
@@ -34,47 +91,134 @@ export async function sendCampaign(campaignId) {
 
 async function processCampaignInBackground(campaign, waAccount) {
   try {
-    const { template_name, contact_ids, requires_follow_up, interactive_params, components: templateComponents = [] } = campaign;
+    console.log("[Campaign] Starting background send", {
+      campaign_id: campaign._id,
+      waba_id: waAccount.waba_id,
+      phone_number_id: waAccount.phone_number_id,
+      phone_number: waAccount.phone_number,
+    });
+
+    const {
+      template_name,
+      contact_ids,
+      requires_follow_up,
+      interactive_params,
+      components: templateComponents = [],
+    } = campaign;
     const contacts = await Contact.find({ _id: { $in: contact_ids } });
-    
+
+    // Validate account can send messages before proceeding
+    try {
+      const checkRes = await fetch(
+        `${META_API}/${waAccount.phone_number_id}?fields=messaging_product,quality_rating,code_verification_status`,
+        { headers: { Authorization: `Bearer ${waAccount.access_token}` } },
+      );
+      const checkData = await checkRes.json();
+
+      console.log("[Campaign] Account messaging capability check", {
+        phone_number_id: waAccount.phone_number_id,
+        messaging_product: checkData.messaging_product,
+        quality_rating: checkData.quality_rating,
+        code_verification_status: checkData.code_verification_status,
+        error: checkData.error?.message || null,
+      });
+
+      if (!checkRes.ok) {
+        const errorMsg = formatMetaError(
+          checkData,
+          "Unable to verify account messaging capability",
+        );
+        console.error("[Campaign] Account check failed:", errorMsg);
+
+        // Mark all messages as failed with this error
+        for (const contact of contacts) {
+          await Message.create({
+            user_id: campaign.user_id,
+            contact_id: contact._id,
+            campaign_id: campaign._id,
+            direction: "outbound",
+            message_type: "template",
+            template_name,
+            content: `[Campaign Blocked: ${template_name}]`,
+            phone_number: contact.phone_number,
+            status: "failed",
+            error_details: `Account Setup Error: ${errorMsg}`,
+          }).catch((logErr) =>
+            console.error(
+              "[Campaign] Failed to record account error:",
+              logErr.message,
+            ),
+          );
+        }
+
+        campaign.status = "failed";
+        await campaign.save();
+        return;
+      }
+    } catch (checkErr) {
+      console.error(
+        "[Campaign] Account capability check exception:",
+        checkErr.message,
+      );
+    }
+
     const componentsMap = new Map();
     if (templateComponents && Array.isArray(templateComponents)) {
-      templateComponents.forEach(comp => { if (comp.type) componentsMap.set(comp.type, comp); });
+      templateComponents.forEach((comp) => {
+        if (comp.type) componentsMap.set(comp.type, comp);
+      });
     }
-    
+
     if (interactive_params) {
-      if (interactive_params.header_image_url && !componentsMap.has('header')) {
+      if (interactive_params.header_image_url && !componentsMap.has("header")) {
         const url = interactive_params.header_image_url;
-        const isVideo = url.match(/\.(mp4|webm|ogg)$/i) || template_name.toLowerCase().includes('video');
+        const isVideo =
+          url.match(/\.(mp4|webm|ogg)$/i) ||
+          template_name.toLowerCase().includes("video");
         const mediaType = isVideo ? "video" : "image";
-        
-        componentsMap.set('header', {
+
+        componentsMap.set("header", {
           type: "header",
-          parameters: [{ 
-            type: mediaType, 
-            [mediaType]: { link: url } 
-          }]
+          parameters: [
+            {
+              type: mediaType,
+              [mediaType]: { link: url },
+            },
+          ],
         });
       }
       if (interactive_params.offer_code) {
-        const futureTime = new Date(new Date().getTime() + (48 * 60 * 60 * 1000));
-        if (!componentsMap.has('button')) {
-          componentsMap.set('limited_time_offer', {
+        const futureTime = new Date(new Date().getTime() + 48 * 60 * 60 * 1000);
+        if (!componentsMap.has("button")) {
+          componentsMap.set("limited_time_offer", {
             type: "limited_time_offer",
-            parameters: [{ type: "limited_time_offer", limited_time_offer: { expiration_time_ms: futureTime.getTime() } }]
+            parameters: [
+              {
+                type: "limited_time_offer",
+                limited_time_offer: {
+                  expiration_time_ms: futureTime.getTime(),
+                },
+              },
+            ],
           });
-          componentsMap.set('button', {
+          componentsMap.set("button", {
             type: "button",
             sub_type: "copy_code",
             index: 0,
-            parameters: [{ type: "coupon_code", coupon_code: interactive_params.offer_code }]
+            parameters: [
+              {
+                type: "coupon_code",
+                coupon_code: interactive_params.offer_code,
+              },
+            ],
           });
         }
       }
     }
 
     const finalComponents = Array.from(componentsMap.values());
-    let sent = 0, failed = 0;
+    let sent = 0,
+      failed = 0;
 
     // Rate limiting: Meta allows ~50-80 msgs/sec per number. We'll be safe with 50.
     const BATCH_SIZE = 50;
@@ -82,99 +226,158 @@ async function processCampaignInBackground(campaign, waAccount) {
 
     for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
       const batch = contacts.slice(i, i + BATCH_SIZE);
-      
+
       const batchPromises = batch.map(async (contact) => {
+        const recipient = normalizePhoneNumber(contact.phone_number);
+        let conversation = null;
+
         try {
-          const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messaging_product: 'whatsapp',
-              to: contact.phone_number,
-              type: 'template',
-              template: { 
-                 name: template_name, 
-                 language: { code: 'en' },
-                 ...(finalComponents.length > 0 && { components: finalComponents })
-              } 
-            }),
-          });
+          if (!recipient || recipient.length < 8) {
+            failed++;
+            await Message.create({
+              user_id: campaign.user_id,
+              contact_id: contact._id,
+              campaign_id: campaign._id,
+              direction: "outbound",
+              message_type: "template",
+              template_name,
+              content: `[Failed Template: ${template_name}]`,
+              phone_number: contact.phone_number,
+              status: "failed",
+              error_details:
+                "Invalid recipient phone number. Use country code and digits only, for example 919876543210.",
+            });
+            return;
+          }
+
+          conversation = await Conversation.findOneAndUpdate(
+            { user_id: campaign.user_id, contact_id: contact._id },
+            {
+              $set: {
+                phone_number: recipient,
+                last_message: `[Template: ${template_name}]`,
+                last_message_at: new Date(),
+                status: "open",
+              },
+            },
+            { upsert: true, returnDocument: "after" },
+          );
+
+          const r = await fetch(
+            `${META_API}/${waAccount.phone_number_id}/messages`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${waAccount.access_token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                messaging_product: "whatsapp",
+                to: recipient,
+                type: "template",
+                template: {
+                  name: template_name,
+                  language: { code: "en" },
+                  ...(finalComponents.length > 0 && {
+                    components: finalComponents,
+                  }),
+                },
+              }),
+            },
+          );
           const data = await r.json();
           const msgId = data.messages?.[0]?.id;
-          
+
           // Extract media URL for history
-          const headerComp = finalComponents.find(c => c.type === 'header');
-          const mediaUrl = headerComp?.parameters?.[0]?.image?.link || 
-                            headerComp?.parameters?.[0]?.video?.link || 
-                            headerComp?.parameters?.[0]?.document?.link;
-  
-          // 1. Ensure Conversation exists and is updated
-          const conversation = await Conversation.findOneAndUpdate(
-            { user_id: campaign.user_id, contact_id: contact._id },
-            { 
-              $set: { 
-                phone_number: contact.phone_number, 
-                last_message: `[Template: ${template_name}]`, 
-                last_message_at: new Date(), 
-                status: 'open' 
-              } 
-            },
-            { upsert: true, returnDocument: 'after' }
-          );
-  
-          if (r.ok) {
+          const headerComp = finalComponents.find((c) => c.type === "header");
+          const mediaUrl =
+            headerComp?.parameters?.[0]?.image?.link ||
+            headerComp?.parameters?.[0]?.video?.link ||
+            headerComp?.parameters?.[0]?.document?.link;
+
+          if (r.ok && msgId) {
             sent++;
             await Message.create({
               user_id: campaign.user_id,
               conversation_id: conversation?._id,
               contact_id: contact._id,
               campaign_id: campaign._id,
-              direction: 'outbound',
-              message_type: 'template',
+              direction: "outbound",
+              message_type: "template",
               template_name,
               content: `[Template: ${template_name}]`,
               media_url: mediaUrl,
-              phone_number: contact.phone_number,
+              phone_number: recipient,
               whatsapp_message_id: msgId,
-              status: 'sent',
-              requires_follow_up
+              status: "sent",
+              requires_follow_up,
             });
           } else {
             failed++;
+            const errorMsg = r.ok
+              ? "Meta accepted the request but did not return a WhatsApp message id."
+              : formatMetaError(data);
+
+            console.log("[Campaign] Message send failed", {
+              campaign_id: campaign._id,
+              contact: contact.phone_number,
+              recipient,
+              status: r.status,
+              error: data?.error,
+              error_msg: errorMsg,
+            });
+
             await Message.create({
               user_id: campaign.user_id,
               conversation_id: conversation?._id,
               contact_id: contact._id,
               campaign_id: campaign._id,
-              direction: 'outbound',
-              message_type: 'template',
+              direction: "outbound",
+              message_type: "template",
               template_name,
               content: `[Failed Template: ${template_name}]`,
-              phone_number: contact.phone_number,
-              status: 'failed',
-              error_details: data.error?.message || 'Meta API Error'
+              phone_number: recipient,
+              status: "failed",
+              error_details: errorMsg,
             });
           }
         } catch (e) {
           failed++;
+          await Message.create({
+            user_id: campaign.user_id,
+            conversation_id: conversation?._id,
+            contact_id: contact._id,
+            campaign_id: campaign._id,
+            direction: "outbound",
+            message_type: "template",
+            template_name,
+            content: `[Failed Template: ${template_name}]`,
+            phone_number: recipient || contact.phone_number,
+            status: "failed",
+            error_details: `${e.name || "SendError"}: ${e.message || "Unable to send message"}`,
+          }).catch((logErr) => {
+            console.error(
+              "[Campaign] Failed to record send error:",
+              logErr.message,
+            );
+          });
         }
       });
-      
+
       await Promise.allSettled(batchPromises);
-      
+
       // Delay before next batch if we have more contacts to process
       if (i + BATCH_SIZE < contacts.length) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+        await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
       }
     }
 
-    campaign.status = 'completed';
+    campaign.status = "completed";
     campaign.completed_at = new Date();
     await campaign.save();
-
   } catch (err) {
-    console.error('Workflow error in campaign process:', err);
-    campaign.status = 'failed';
+    console.error("Workflow error in campaign process:", err);
+    campaign.status = "failed";
     await campaign.save();
   }
 }

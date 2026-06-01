@@ -6,6 +6,18 @@ import { AutoReply } from '../models/Automation.js';
 import Conversation from '../models/Conversation.js';
 import { emitToUser } from '../socket.js';
 
+const formatWebhookError = (error) => {
+  if (!error) return null;
+
+  return [
+    error.message,
+    error.code ? `code: ${error.code}` : null,
+    error.error_subcode ? `subcode: ${error.error_subcode}` : null,
+    error.error_data?.details,
+    error.href,
+  ].filter(Boolean).join(' | ');
+};
+
 export class WebhookService {
   
   static async processWebhookEvent(body) {
@@ -56,7 +68,7 @@ export class WebhookService {
           for (const s of value.statuses) {
             const statusUpdate = { status: s.status };
             if (s.errors && s.errors.length > 0) {
-              statusUpdate.error_details = s.errors[0].message;
+              statusUpdate.error_details = formatWebhookError(s.errors[0]);
               console.log(`[Webhook Status] ❌ Message ${s.id} failed: ${s.errors[0].message}`);
             }
             if (s.status === 'delivered') statusUpdate.delivered_at = new Date();

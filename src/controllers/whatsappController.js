@@ -35,7 +35,8 @@ export class WhatsAppController {
       const resolvedBusiness = assets.business;
       const resolvedWaba = assets.waba;
       const resolvedPhone = assets.phoneNumber;
-      const resolvedBusinessId = resolvedBusiness?.id || resolvedWaba?.business?.id;
+      const resolvedBusinessId =
+        resolvedBusiness?.id || resolvedWaba?.business?.id;
       const resolvedWabaId = resolvedWaba?.id || waba_id;
       const resolvedPhoneNumberId = resolvedPhone?.id || phone_number_id;
 
@@ -58,19 +59,49 @@ export class WhatsAppController {
       });
 
       const tokenInfo = await MetaApiService.verifyToken(accessToken);
-      const requiredScopes = ["whatsapp_business_management", "whatsapp_business_messaging", "business_management"];
-      const hasScopes = requiredScopes.every(scope => tokenInfo.scopes.includes(scope));
+      const requiredScopes = [
+        "whatsapp_business_management",
+        "whatsapp_business_messaging",
+        "business_management",
+      ];
+      const hasScopes = requiredScopes.every((scope) =>
+        tokenInfo.scopes.includes(scope),
+      );
       console.log("[OAuth Connect] Token Verification", {
         is_valid: tokenInfo.valid,
         has_required_scopes: hasScopes,
         scopes: tokenInfo.scopes,
-        belongs_to_business: !!resolvedBusinessId
+        belongs_to_business: !!resolvedBusinessId,
       });
 
-
-      const phoneData =
+      let phoneData =
         resolvedPhone ||
-        (await MetaApiService.getPhoneNumber(resolvedPhoneNumberId, accessToken));
+        (await MetaApiService.getPhoneNumber(
+          resolvedPhoneNumberId,
+          accessToken,
+        ));
+
+      // CRITICAL FIX: Ensure phoneData is not null
+      if (!phoneData) {
+        console.warn(
+          "[OAuth Connect] Phone data is null, attempting fresh fetch",
+          {
+            phone_number_id: resolvedPhoneNumberId,
+          },
+        );
+        // Try one more time with explicit error catching
+        try {
+          phoneData = await MetaApiService.getPhoneNumber(
+            resolvedPhoneNumberId,
+            accessToken,
+          );
+        } catch (err) {
+          console.error(
+            "[OAuth Connect] Failed to fetch phone data:",
+            err.message,
+          );
+        }
+      }
 
       const biz = await Business.findOneAndUpdate(
         { user_id: userId },
@@ -92,6 +123,9 @@ export class WhatsAppController {
       const existing = await WhatsAppAccount.findOne({ user_id: userId });
       const samePhone = existing?.phone_number_id === resolvedPhoneNumberId;
 
+      // Use actual display_phone_number from Meta, don't fallback to ID
+      const displayPhoneNumber = phoneData?.display_phone_number || "";
+
       const waAccount = await WhatsAppAccount.findOneAndUpdate(
         { user_id: userId },
         {
@@ -99,14 +133,16 @@ export class WhatsAppController {
             phone_number_id: resolvedPhoneNumberId,
             waba_id: resolvedWabaId,
             access_token: accessToken,
-            phone_number: phoneData?.display_phone_number,
+            phone_number: displayPhoneNumber,
             quality_rating: phoneData?.quality_rating,
             verified_name: phoneData?.verified_name || phoneData?.name,
             business_id: biz._id,
             webhook_verified: true,
             registration_error: null,
             meta_error_message: null,
-            meta_wa_status: samePhone ? existing?.meta_wa_status || "pending" : "pending",
+            meta_wa_status: samePhone
+              ? existing?.meta_wa_status || "pending"
+              : "pending",
             registration_attempt_count: samePhone
               ? existing?.registration_attempt_count || 0
               : 0,
@@ -124,9 +160,12 @@ export class WhatsAppController {
         business_id: biz.meta_business_id || null,
         waba_id: waAccount.waba_id,
         phone_number_id: waAccount.phone_number_id,
+        phone_number: waAccount.phone_number,
       });
 
-      const registrationResult = await attemptRegistrationIfNeeded(waAccount, { force: true });
+      const registrationResult = await attemptRegistrationIfNeeded(waAccount, {
+        force: true,
+      });
       console.log("[OAuth Connect] Registration evaluation result", {
         status: registrationResult.status,
         attempted: registrationResult.attempted,
@@ -135,14 +174,19 @@ export class WhatsAppController {
         error: registrationResult.error || null,
       });
 
-      await MetaApiService.subscribeAppToWaba(resolvedWabaId, accessToken).catch(
-        (err) => {
-          console.warn("[OAuth Connect] Webhook subscription failed:", err.message);
-        },
-      );
+      await MetaApiService.subscribeAppToWaba(
+        resolvedWabaId,
+        accessToken,
+      ).catch((err) => {
+        console.warn(
+          "[OAuth Connect] Webhook subscription failed:",
+          err.message,
+        );
+      });
 
       const finalAccount =
-        registrationResult.account || (await WhatsAppAccount.findById(waAccount._id));
+        registrationResult.account ||
+        (await WhatsAppAccount.findById(waAccount._id));
 
       return res.json({
         success: true,
@@ -150,7 +194,8 @@ export class WhatsAppController {
         business_id: resolvedBusinessId || null,
         waba_id: resolvedWabaId,
         phone_number_id: resolvedPhoneNumberId,
-        phone_number: finalAccount?.phone_number || phoneData?.display_phone_number,
+        phone_number:
+          finalAccount?.phone_number || phoneData?.display_phone_number,
         registration_status: registrationResult.status,
         dashboard_status: getDashboardStatus(finalAccount),
       });
@@ -195,7 +240,11 @@ export class WhatsAppController {
       }
 
       const result = await attemptRegistrationIfNeeded(waAccount);
-      const statusCode = result.success || !result.attempted ? 200 : 400;
+      const statusCode = result.cooldown
+        ? 429
+        : result.success || !result.attempted
+          ? 200
+          : 400;
 
       return res.status(statusCode).json({
         success: result.success,
@@ -205,6 +254,11 @@ export class WhatsAppController {
         message: result.message,
         error: result.error,
         timeout: result.timeout || false,
+        cooldown: result.cooldown || false,
+        rate_limited: result.rate_limited || false,
+        retry_after_seconds: result.retry_after_seconds,
+        retry_after: result.retry_after,
+        retry_stopped: result.retry_stopped || false,
         meta_response: result.meta_response,
       });
     } catch (err) {
@@ -234,12 +288,16 @@ export class WhatsAppController {
 
         if (action === "sync_templates") {
           const Template = (await import("../models/Template.js")).default;
-          const { uploadToCloudinary } = await import("../services/cloudinary.js");
+          const { uploadToCloudinary } =
+            await import("../services/cloudinary.js");
 
           for (const mt of metaTemplates) {
             let cloudinaryUrl = undefined;
             const header = mt.components?.find((c) => c.type === "HEADER");
-            if (header && ["IMAGE", "VIDEO", "DOCUMENT"].includes(header.format)) {
+            if (
+              header &&
+              ["IMAGE", "VIDEO", "DOCUMENT"].includes(header.format)
+            ) {
               const existing = await Template.findOne({
                 user_id: userId,
                 name: mt.name,

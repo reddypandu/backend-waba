@@ -24,6 +24,11 @@ import {
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+const STATUS_SYNC_CACHE_MS = 60 * 1000;
+const statusSyncInFlight = new Set();
+
+const secondsUntil = (date) =>
+  Math.max(0, Math.ceil((new Date(date).getTime() - Date.now()) / 1000));
 
 const legacyUserIdFilter = (userId) => ({
   $expr: { $eq: [{ $toString: "$user_id" }, String(userId)] },
@@ -988,6 +993,47 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "WhatsApp account not connected" });
     }
 
+    const forceSync = req.query.force === "true";
+    const cacheAgeMs = waAccount.meta_status_last_synced
+      ? Date.now() - new Date(waAccount.meta_status_last_synced).getTime()
+      : Infinity;
+
+    if (!forceSync && cacheAgeMs < STATUS_SYNC_CACHE_MS) {
+      const retryAfterSeconds = Math.ceil(
+        (STATUS_SYNC_CACHE_MS - cacheAgeMs) / 1000,
+      );
+      return res.json({
+        success: true,
+        cached: true,
+        cooldown: true,
+        retry_after_seconds: retryAfterSeconds,
+        phone_number: waAccount.phone_number,
+        phone_number_id: waAccount.phone_number_id,
+        waba_id: waAccount.waba_id,
+        meta_wa_status: waAccount.meta_wa_status || waAccount.verification_status,
+        is_meta_test_number: waAccount.is_meta_test_number || false,
+        was_messaging: waAccount.was_messaging || false,
+        dashboard_status: getDashboardStatus(waAccount),
+        should_register: false,
+        registration_state: "cached",
+        registration_error: waAccount.registration_error,
+        registration_attempt_count: waAccount.registration_attempt_count || 0,
+        last_synced: waAccount.meta_status_last_synced,
+        message: `Using recently synced status. Please wait ${retryAfterSeconds} seconds before checking Meta again.`,
+      });
+    }
+
+    const syncKey = String(waAccount._id);
+    if (statusSyncInFlight.has(syncKey)) {
+      return res.status(429).json({
+        error: "Status sync is already in progress. Please wait a moment.",
+        cooldown: true,
+        retry_after_seconds: 10,
+      });
+    }
+
+    statusSyncInFlight.add(syncKey);
+
     // Safely sync status from Meta API
     const syncResult = await syncAccountStatusFromMeta(waAccount);
 
@@ -997,8 +1043,13 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
     // Get dashboard-friendly status
     const dashboardStatus = getDashboardStatus(updated || waAccount);
 
-    res.json({
+    const statusCode = syncResult.rateLimited ? 429 : 200;
+    res.status(statusCode).json({
       success: true,
+      cooldown: !!syncResult.rateLimited,
+      rate_limited: !!syncResult.rateLimited,
+      retry_after_seconds: syncResult.retryAfterSeconds,
+      retry_after: syncResult.cooldownUntil,
       phone_number: updated?.phone_number || waAccount.phone_number,
       phone_number_id: updated?.phone_number_id || waAccount.phone_number_id,
       waba_id: updated?.waba_id || waAccount.waba_id,
@@ -1012,9 +1063,11 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
       registration_attempt_count:
         updated?.registration_attempt_count || waAccount.registration_attempt_count || 0,
       last_synced: syncResult.timestamp,
-      message: syncResult.shouldRegister
-        ? "Phone number needs registration. Call /register API to complete setup."
-        : syncResult.isTestNumber
+      message: syncResult.rateLimited
+        ? syncResult.error
+        : syncResult.shouldRegister
+          ? "Phone number needs registration. Call /register API to complete setup."
+          : syncResult.isTestNumber
           ? "This is a Meta test number for development/testing only."
           : "Account status synced from Meta. " +
             (syncResult.isMessaging
@@ -1024,6 +1077,14 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[Whatsapp Status] Error:", err);
     res.status(500).json({ error: err.message });
+  } finally {
+    if (req.user?.id) {
+      const current = await WhatsAppAccount.findOne({ user_id: req.user.id })
+        .select("_id")
+        .lean()
+        .catch(() => null);
+      if (current?._id) statusSyncInFlight.delete(String(current._id));
+    }
   }
 });
 
@@ -1120,7 +1181,11 @@ router.post("/whatsapp-register", requireAuth, async (req, res) => {
     }
 
     const result = await attemptRegistrationIfNeeded(waAccount, { force });
-    const statusCode = result.success || !result.attempted ? 200 : 400;
+    const statusCode = result.cooldown
+      ? 429
+      : result.success || !result.attempted
+        ? 200
+        : 400;
 
     res.status(statusCode).json({
       success: result.success,
@@ -1130,6 +1195,11 @@ router.post("/whatsapp-register", requireAuth, async (req, res) => {
       message: result.message,
       error: result.error,
       timeout: result.timeout || false,
+      cooldown: result.cooldown || false,
+      rate_limited: result.rate_limited || false,
+      retry_after_seconds: result.retry_after_seconds,
+      retry_after: result.retry_after,
+      retry_stopped: result.retry_stopped || false,
       meta_response: result.meta_response,
     });
   } catch (err) {

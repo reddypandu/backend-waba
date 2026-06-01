@@ -11,11 +11,20 @@ export async function startCampaignWorker() {
   setInterval(async () => {
     try {
       const now = new Date();
+      const staleRunningBefore = new Date(now.getTime() - (2 * 60 * 1000));
       // Find campaigns with a past scheduled time that haven't been processed yet
       const pendingCampaigns = await Campaign.find({
-        status: { $in: ['scheduled', 'draft', 'launch_queued'] },
-        schedule_type: 'later',
-        scheduled_at: { $lte: now }
+        $or: [
+          {
+            status: { $in: ['scheduled', 'draft', 'launch_queued'] },
+            schedule_type: 'later',
+            scheduled_at: { $lte: now }
+          },
+          {
+            status: 'running',
+            started_at: { $lte: staleRunningBefore }
+          }
+        ]
       });
       
       if (pendingCampaigns.length > 0) {

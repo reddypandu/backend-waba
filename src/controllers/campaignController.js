@@ -1,13 +1,12 @@
-import mongoose from 'mongoose';
-import Campaign from '../models/Campaign.js';
-import Message from '../models/Message.js';
-import Contact from '../models/Contact.js';
-import WhatsAppAccount from '../models/WhatsAppAccount.js';
-import { sendCampaign } from '../utils/campaign.js'; // Existing bulk sender logic
+import mongoose from "mongoose";
+import Campaign from "../models/Campaign.js";
+import Message from "../models/Message.js";
+import Contact from "../models/Contact.js";
+import WhatsAppAccount from "../models/WhatsAppAccount.js";
+import { sendCampaign } from "../utils/campaign.js"; // Existing bulk sender logic
 
-const toObjectId = (id) => (
-  mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null
-);
+const toObjectId = (id) =>
+  mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null;
 
 const legacyIdMatch = (field, id) => {
   const objectId = toObjectId(id);
@@ -22,7 +21,6 @@ const legacyIdValues = (id) => {
 };
 
 export class CampaignController {
-
   static async getCampaigns(req, res) {
     try {
       const userIds = legacyIdValues(req.user.id);
@@ -31,116 +29,186 @@ export class CampaignController {
         { $sort: { createdAt: -1 } },
         {
           $lookup: {
-            from: 'messages',
-            let: { campaignId: '$_id', campaignIdString: { $toString: '$_id' } },
+            from: "messages",
+            let: {
+              campaignId: "$_id",
+              campaignIdString: { $toString: "$_id" },
+            },
             pipeline: [
               {
                 $match: {
                   $expr: {
                     $or: [
-                      { $eq: ['$campaign_id', '$$campaignId'] },
-                      { $eq: ['$campaign_id', '$$campaignIdString'] }
-                    ]
+                      { $eq: ["$campaign_id", "$$campaignId"] },
+                      { $eq: ["$campaign_id", "$$campaignIdString"] },
+                    ],
                   },
-                  user_id: { $in: userIds }
-                }
-              }
+                  user_id: { $in: userIds },
+                },
+              },
             ],
-            as: 'msgs',
-          }
+            as: "msgs",
+          },
         },
         {
           $addFields: {
             stats: {
-              sent: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['sent', 'delivered', 'read', 'replied']] } } } },
-              delivered: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['delivered', 'read', 'replied']] } } } },
-              read: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $in: ['$$m.status', ['read', 'replied']] } } } },
-              failed: { $size: { $filter: { input: '$msgs', as: 'm', cond: { $eq: ['$$m.status', 'failed'] } } } }
-            }
-          }
+              sent: {
+                $size: {
+                  $filter: {
+                    input: "$msgs",
+                    as: "m",
+                    cond: {
+                      $in: [
+                        "$$m.status",
+                        ["sent", "delivered", "read", "replied"],
+                      ],
+                    },
+                  },
+                },
+              },
+              delivered: {
+                $size: {
+                  $filter: {
+                    input: "$msgs",
+                    as: "m",
+                    cond: {
+                      $in: ["$$m.status", ["delivered", "read", "replied"]],
+                    },
+                  },
+                },
+              },
+              read: {
+                $size: {
+                  $filter: {
+                    input: "$msgs",
+                    as: "m",
+                    cond: { $in: ["$$m.status", ["read", "replied"]] },
+                  },
+                },
+              },
+              failed: {
+                $size: {
+                  $filter: {
+                    input: "$msgs",
+                    as: "m",
+                    cond: { $eq: ["$$m.status", "failed"] },
+                  },
+                },
+              },
+            },
+          },
         },
-        { $project: { msgs: 0 } }
+        { $project: { msgs: 0 } },
       ]);
       res.json({ campaigns });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async getCampaignById(req, res) {
     try {
       const campaign = await Campaign.findOne({
         _id: req.params.id,
-        ...legacyIdMatch('user_id', req.user.id),
+        ...legacyIdMatch("user_id", req.user.id),
       });
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+      if (!campaign)
+        return res.status(404).json({ error: "Campaign not found" });
       res.json({ campaign });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async createCampaign(req, res) {
     try {
-      const { name, template_name, audience_type = 'existing', schedule_type = 'now', scheduled_at, contacts = [], requires_follow_up = false, interactive_params = null } = req.body;
-      if (!name) return res.status(400).json({ error: 'Campaign name required' });
-  
+      const {
+        name,
+        template_name,
+        audience_type = "existing",
+        schedule_type = "now",
+        scheduled_at,
+        contacts = [],
+        requires_follow_up = false,
+        interactive_params = null,
+      } = req.body;
+      if (!name)
+        return res.status(400).json({ error: "Campaign name required" });
+
       let campaignContactIds = [];
       if (contacts && contacts.length > 0) {
         campaignContactIds = contacts;
-      } else if (audience_type === 'existing') {
+      } else if (audience_type === "existing") {
         // Only target opted-in contacts
-        const allContacts = await Contact.find({ user_id: req.user.id, opt_in_status: { $ne: 'opted_out' } });
-        campaignContactIds = allContacts.map(c => c._id);
+        const allContacts = await Contact.find({
+          user_id: req.user.id,
+          opt_in_status: { $ne: "opted_out" },
+        });
+        campaignContactIds = allContacts.map((c) => c._id);
       }
-  
+
       const campaign = await Campaign.create({
         user_id: req.user.id,
         name,
         template_name,
         audience_type,
         schedule_type,
-        scheduled_at: schedule_type === 'later' ? scheduled_at : null,
+        scheduled_at: schedule_type === "later" ? scheduled_at : null,
         total_contacts: campaignContactIds.length,
         contact_ids: campaignContactIds,
-        status: schedule_type === 'later' ? 'scheduled' : 'draft',
+        status: schedule_type === "later" ? "scheduled" : "draft",
         requires_follow_up,
         interactive_params,
-        components: req.body.components || [], 
+        components: req.body.components || [],
       });
-  
+
       res.json({ success: true, campaign_id: campaign._id });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async sendCampaign(req, res) {
     try {
-      // For Phase 2, we can just update status to 'running' and let the worker pick it up, 
-      // or directly invoke the sendCampaign util for 'now' schedules.
-      const campaign = await Campaign.findOneAndUpdate(
-        { _id: req.params.id, ...legacyIdMatch('user_id', req.user.id) },
-        { status: 'running', started_at: new Date() },
-        { new: true }
-      );
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+      const campaign = await Campaign.findOne({
+        _id: req.params.id,
+        ...legacyIdMatch("user_id", req.user.id),
+      });
+      if (!campaign)
+        return res.status(404).json({ error: "Campaign not found" });
 
-      // Non-blocking send
-      sendCampaign(req.params.id).catch(err => console.error('Campaign sending error:', err));
-      
-      res.json({ success: true, message: 'Campaign started' });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+      const result = await sendCampaign(req.params.id);
+      if (result.error) return res.status(400).json({ error: result.error });
+
+      res.json({ success: true, message: "Campaign started" });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async updateCampaignStatus(req, res) {
     try {
       const { status } = req.body;
-      const allowedStatuses = ['draft', 'scheduled', 'running', 'completed', 'paused', 'failed'];
+      const allowedStatuses = [
+        "draft",
+        "scheduled",
+        "running",
+        "completed",
+        "paused",
+        "failed",
+      ];
       if (!allowedStatuses.includes(status)) {
-        return res.status(400).json({ error: 'Invalid campaign status' });
+        return res.status(400).json({ error: "Invalid campaign status" });
       }
 
       const campaign = await Campaign.findOneAndUpdate(
-        { _id: req.params.id, ...legacyIdMatch('user_id', req.user.id) },
+        { _id: req.params.id, ...legacyIdMatch("user_id", req.user.id) },
         { status },
-        { new: true }
+        { new: true },
       );
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+      if (!campaign)
+        return res.status(404).json({ error: "Campaign not found" });
 
       res.json({ success: true, campaign });
     } catch (err) {
@@ -153,47 +221,99 @@ export class CampaignController {
       const campaignId = req.params.id;
       const campaignIds = legacyIdValues(campaignId);
       const userIds = legacyIdValues(req.user.id);
+
+      const campaign = await Campaign.findOne({
+        _id: campaignIds[0],
+        user_id: userIds[0],
+      });
+
       const stats = await Message.aggregate([
-        { 
-          $match: { 
+        {
+          $match: {
             campaign_id: { $in: campaignIds },
-            user_id: { $in: userIds }
-          } 
+            user_id: { $in: userIds },
+          },
         },
         {
           $group: {
             _id: null,
-            sent: { $sum: { $cond: [{ $in: ['$status', ['sent', 'delivered', 'read', 'replied']] }, 1, 0] } },
-            delivered: { $sum: { $cond: [{ $in: ['$status', ['delivered', 'read', 'replied']] }, 1, 0] } },
-            read: { $sum: { $cond: [{ $in: ['$status', ['read', 'replied']] }, 1, 0] } },
-            failed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
-            replied: { $sum: { $cond: [{ $eq: ['$status', 'replied'] }, 1, 0] } }
-          }
-        }
+            sent: {
+              $sum: {
+                $cond: [
+                  {
+                    $in: ["$status", ["sent", "delivered", "read", "replied"]],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            delivered: {
+              $sum: {
+                $cond: [
+                  { $in: ["$status", ["delivered", "read", "replied"]] },
+                  1,
+                  0,
+                ],
+              },
+            },
+            read: {
+              $sum: {
+                $cond: [{ $in: ["$status", ["read", "replied"]] }, 1, 0],
+              },
+            },
+            failed: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
+            replied: {
+              $sum: { $cond: [{ $eq: ["$status", "replied"] }, 1, 0] },
+            },
+          },
+        },
       ]);
-  
+
       const result = stats[0] || {
         sent: 0,
         delivered: 0,
         read: 0,
         failed: 0,
-        replied: 0
+        replied: 0,
       };
+
+      // If messages are sent but not delivered, check account status
+      if (result.sent > 0 && result.delivered === 0) {
+        const waAccount = await WhatsAppAccount.findOne({
+          user_id: campaign?.user_id,
+        });
+        if (waAccount) {
+          result.account_status = {
+            meta_wa_status: waAccount.meta_wa_status,
+            meta_error_message: waAccount.meta_error_message,
+            verification_status: waAccount.verification_status,
+          };
+        }
+      }
+
       res.json(result);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async deleteCampaign(req, res) {
     try {
       const { id } = req.params;
-      if (!id) return res.status(400).json({ error: 'Campaign ID required' });
-      await Campaign.findOneAndDelete({ _id: id, ...legacyIdMatch('user_id', req.user.id) });
+      if (!id) return res.status(400).json({ error: "Campaign ID required" });
+      await Campaign.findOneAndDelete({
+        _id: id,
+        ...legacyIdMatch("user_id", req.user.id),
+      });
       await Message.deleteMany({
         campaign_id: { $in: legacyIdValues(id) },
         user_id: { $in: legacyIdValues(req.user.id) },
       });
       res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async retargetFailed(req, res) {
@@ -201,50 +321,64 @@ export class CampaignController {
     try {
       const campaign = await Campaign.findOne({
         _id: req.params.id,
-        ...legacyIdMatch('user_id', req.user.id),
+        ...legacyIdMatch("user_id", req.user.id),
       });
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-  
-      const failedMessages = await Message.find({ 
+      if (!campaign)
+        return res.status(404).json({ error: "Campaign not found" });
+
+      const failedMessages = await Message.find({
         campaign_id: { $in: legacyIdValues(campaign._id.toString()) },
         user_id: { $in: legacyIdValues(req.user.id) },
-        status: 'failed' 
+        status: "failed",
       });
-      if (failedMessages.length === 0) return res.json({ success: true, sent: 0, message: 'No failed messages' });
-  
+      if (failedMessages.length === 0)
+        return res.json({
+          success: true,
+          sent: 0,
+          message: "No failed messages",
+        });
+
       const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
       let sent = 0;
-      const META_API = 'https://graph.facebook.com/v24.0';
+      const META_API = "https://graph.facebook.com/v24.0";
 
       for (const msg of failedMessages) {
         try {
           const components = campaign.components || [];
-          const r = await fetch(`${META_API}/${waAccount.phone_number_id}/messages`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${waAccount.access_token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messaging_product: 'whatsapp',
-              to: msg.phone_number,
-              type: 'template',
-              template: { 
-                name: campaign.template_name, 
-                language: { code: 'en' },
-                ...(components.length > 0 && { components })
-              }
-            }),
-          });
+          const r = await fetch(
+            `${META_API}/${waAccount.phone_number_id}/messages`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${waAccount.access_token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                messaging_product: "whatsapp",
+                to: msg.phone_number,
+                type: "template",
+                template: {
+                  name: campaign.template_name,
+                  language: { code: "en" },
+                  ...(components.length > 0 && { components }),
+                },
+              }),
+            },
+          );
           const data = await r.json();
           if (r.ok) {
             sent++;
-            await Message.findByIdAndUpdate(msg._id, { 
-              status: 'sent', 
+            await Message.findByIdAndUpdate(msg._id, {
+              status: "sent",
               whatsapp_message_id: data.messages?.[0]?.id,
-              error_details: null 
+              error_details: null,
             });
           }
         } catch (_) {}
       }
       res.json({ success: true, sent });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
 }

@@ -4,14 +4,24 @@ const APP_ID = process.env.META_APP_ID;
 const APP_SECRET = process.env.META_APP_SECRET;
 const DEFAULT_TIMEOUT_MS = 15000;
 
-const withTimeout = async (url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) => {
+const withTimeout = async (
+  url,
+  options = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
     const data = await res.json().catch(() => null);
-    return { ok: res.ok, status: res.status, statusText: res.statusText, data };
+    return {
+      ok: res.ok,
+      status: res.status,
+      statusText: res.statusText,
+      data,
+      headers: res.headers,
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -24,6 +34,41 @@ const authHeaders = (accessToken, extra = {}) => ({
 
 const first = (value) => (Array.isArray(value) ? value[0] : value);
 
+const RATE_LIMIT_CODES = new Set([4, 17, 32, 613, 80004]);
+
+export const getMetaError = (result) => result?.data?.error || null;
+
+export const isMetaRateLimitError = (resultOrError) => {
+  const metaError = getMetaError(resultOrError);
+  const message = `${
+    metaError?.message ||
+    resultOrError?.error ||
+    resultOrError?.message ||
+    ""
+  }`.toLowerCase();
+
+  return (
+    resultOrError?.status === 429 ||
+    RATE_LIMIT_CODES.has(Number(metaError?.code)) ||
+    RATE_LIMIT_CODES.has(Number(metaError?.error_subcode)) ||
+    message.includes("rate limit") ||
+    message.includes("too many calls") ||
+    message.includes("temporarily blocked")
+  );
+};
+
+export const getMetaRetryAfterSeconds = (
+  resultOrError,
+  fallbackSeconds = 120,
+) => {
+  const retryAfter =
+    typeof resultOrError?.headers?.get === "function"
+      ? resultOrError.headers.get("retry-after")
+      : null;
+  const parsed = Number(retryAfter);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackSeconds;
+};
+
 export class MetaApiService {
   static graphVersion = GRAPH_VERSION;
   static baseUrl = META_API;
@@ -33,7 +78,9 @@ export class MetaApiService {
       `${META_API}/oauth/access_token?client_id=${APP_ID}&client_secret=${APP_SECRET}&code=${code}`,
     );
     if (!tokenRes.ok) {
-      throw new Error(`Token exchange failed: ${JSON.stringify(tokenRes.data)}`);
+      throw new Error(
+        `Token exchange failed: ${JSON.stringify(tokenRes.data)}`,
+      );
     }
 
     const llRes = await withTimeout(
@@ -97,8 +144,23 @@ export class MetaApiService {
         status: res.status,
         error: res.data?.error,
       });
+      if (isMetaRateLimitError(res)) {
+        const retryAfterSeconds = getMetaRetryAfterSeconds(res);
+        const err = new Error(
+          `Meta API rate limit reached. Please wait ${retryAfterSeconds} seconds before trying again.`,
+        );
+        err.rateLimited = true;
+        err.retryAfterSeconds = retryAfterSeconds;
+        throw err;
+      }
       return null;
     }
+    console.log("[Meta Phone] Fetched phone number data:", {
+      phone_number_id: phoneNumberId,
+      display_phone_number: res.data?.display_phone_number,
+      verified_name: res.data?.verified_name,
+      id: res.data?.id,
+    });
     return res.data;
   }
 
@@ -135,7 +197,10 @@ export class MetaApiService {
     }
 
     if (hints.phone_number_id) {
-      phoneNumber = await this.getPhoneNumber(hints.phone_number_id, accessToken);
+      phoneNumber = await this.getPhoneNumber(
+        hints.phone_number_id,
+        accessToken,
+      );
     }
 
     if (waba && !phoneNumber) {
@@ -146,7 +211,10 @@ export class MetaApiService {
     if (!waba || !phoneNumber || !business) {
       const fields =
         "businesses{id,name,owned_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name,name,quality_rating,code_verification_status}}}";
-      const res = await this.graphGet(`me?fields=${encodeURIComponent(fields)}`, accessToken);
+      const res = await this.graphGet(
+        `me?fields=${encodeURIComponent(fields)}`,
+        accessToken,
+      );
       if (res.ok) {
         const businesses = res.data?.businesses?.data || [];
         business =
@@ -156,10 +224,12 @@ export class MetaApiService {
           null;
 
         const allWabas = businesses.flatMap((item) =>
-          (item.owned_whatsapp_business_accounts?.data || []).map((account) => ({
-            ...account,
-            business: { id: item.id, name: item.name },
-          })),
+          (item.owned_whatsapp_business_accounts?.data || []).map(
+            (account) => ({
+              ...account,
+              business: { id: item.id, name: item.name },
+            }),
+          ),
         );
 
         waba =
@@ -200,7 +270,10 @@ export class MetaApiService {
   }
 
   static async getBusinessProfile(phoneNumberId, accessToken) {
-    return this.graphGet(`${phoneNumberId}/whatsapp_business_profile`, accessToken);
+    return this.graphGet(
+      `${phoneNumberId}/whatsapp_business_profile`,
+      accessToken,
+    );
   }
 
   static async registerPhoneNumber(phoneNumberId, accessToken, pin) {
@@ -213,12 +286,17 @@ export class MetaApiService {
       timeout_ms: DEFAULT_TIMEOUT_MS,
     });
     console.log("[Register API] Request Body:", JSON.stringify(requestBody));
-    console.log("[Register API] Auth Header:", `Bearer ${accessToken.slice(0, 20)}...`);
+    console.log(
+      "[Register API] Auth Header:",
+      `Bearer ${accessToken.slice(0, 20)}...`,
+    );
 
     try {
       const res = await withTimeout(url, {
         method: "POST",
-        headers: authHeaders(accessToken, { "Content-Type": "application/json" }),
+        headers: authHeaders(accessToken, {
+          "Content-Type": "application/json",
+        }),
         body: JSON.stringify(requestBody),
       });
 
@@ -242,7 +320,9 @@ export class MetaApiService {
         ok: false,
         status: 0,
         data: null,
-        error: timeout ? "Meta registration request timed out" : `${err.name}: ${err.message}`,
+        error: timeout
+          ? "Meta registration request timed out"
+          : `${err.name}: ${err.message}`,
         timeout,
       };
     }
@@ -264,7 +344,10 @@ export class MetaApiService {
   }
 
   static async fetchTemplates(wabaId, accessToken) {
-    const res = await this.graphGet(`${wabaId}/message_templates?limit=100`, accessToken);
+    const res = await this.graphGet(
+      `${wabaId}/message_templates?limit=100`,
+      accessToken,
+    );
     if (!res.ok) {
       throw new Error(res.data?.error?.message || "Failed to fetch templates");
     }
