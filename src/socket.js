@@ -1,13 +1,14 @@
-import { Server } from 'socket.io';
-import jwt from 'jsonwebtoken';
+import { Server } from "socket.io";
+import jwt from "jsonwebtoken";
 
 let io;
 
 export const initSocket = (server) => {
   io = new Server(server, {
+    path: "/api/socket.io",
     cors: {
-      origin: '*', // Set to actual frontend domain in prod
-      methods: ['GET', 'POST'],
+      origin: "*", // Set to actual frontend domain in prod
+      methods: ["GET", "POST"],
     },
   });
 
@@ -15,24 +16,26 @@ export const initSocket = (server) => {
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
     if (!token) {
-      return next(new Error('Authentication error: Token required'));
+      return next(new Error("Authentication error: Token required"));
     }
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       socket.user = decoded; // { id, email, role }
       next();
     } catch (err) {
-      next(new Error('Authentication error: Invalid token'));
+      next(new Error("Authentication error: Invalid token"));
     }
   });
 
-  io.on('connection', (socket) => {
-    console.log(`[Socket] User connected: ${socket.user.email} (ID: ${socket.user.id})`);
+  io.on("connection", (socket) => {
+    console.log(
+      `[Socket] User connected: ${socket.user.email} (ID: ${socket.user.id})`,
+    );
 
     // Join a room specific to the user/account to receive isolated events
     socket.join(`account_${socket.user.id}`);
 
-    socket.on('disconnect', () => {
+    socket.on("disconnect", () => {
       console.log(`[Socket] User disconnected: ${socket.user.email}`);
     });
   });
@@ -42,7 +45,7 @@ export const initSocket = (server) => {
 
 export const getIo = () => {
   if (!io) {
-    throw new Error('Socket.io has not been initialized!');
+    throw new Error("Socket.io has not been initialized!");
   }
   return io;
 };
