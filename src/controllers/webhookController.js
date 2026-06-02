@@ -15,11 +15,14 @@ export class WebhookController {
 
   static async handleWebhook(req, res) {
     // Acknowledge receipt immediately to avoid Meta retries
-    res.json({ success: true });
+    res.sendStatus(200);
 
     try {
       const body = req.body;
       const rawBody = req.rawBody || JSON.stringify(body);
+      
+      console.log("[Webhook] Incoming payload:\n", JSON.stringify(body, null, 2));
+
       const sig = req.headers['x-hub-signature-256'];
 
       if (process.env.META_APP_SECRET && sig) {

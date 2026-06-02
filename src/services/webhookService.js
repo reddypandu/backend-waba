@@ -4,6 +4,7 @@ import Message from "../models/Message.js";
 import Template from "../models/Template.js";
 import { AutoReply } from "../models/Automation.js";
 import Conversation from "../models/Conversation.js";
+import Campaign from "../models/Campaign.js";
 import { emitToUser } from "../socket.js";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
@@ -107,6 +108,35 @@ export class WebhookService {
                 status: s.status,
                 error_details: statusUpdate.error_details,
               });
+
+              if (updatedMsg.campaign_id) {
+                const incObj = {};
+                if (s.status === "sent") incObj.accepted_count = 1;
+                if (s.status === "delivered") incObj.delivered_count = 1;
+                if (s.status === "read") incObj.read_count = 1;
+                if (s.status === "failed") incObj.failed_count = 1;
+
+                if (Object.keys(incObj).length > 0) {
+                  const updatedCampaign = await Campaign.findByIdAndUpdate(
+                    updatedMsg.campaign_id,
+                    { $inc: incObj },
+                    { new: true }
+                  );
+                  if (updatedCampaign) {
+                    emitToUser(updatedMsg.user_id, "campaign_update", {
+                      campaign_id: updatedCampaign._id,
+                      stats: {
+                        attempted: updatedCampaign.attempted_count,
+                        accepted: updatedCampaign.accepted_count,
+                        delivered: updatedCampaign.delivered_count,
+                        read: updatedCampaign.read_count,
+                        replied: updatedCampaign.replied_count,
+                        failed: updatedCampaign.failed_count
+                      }
+                    });
+                  }
+                }
+              }
             }
 
             // Automated Follow-up Logic (from sample app)
@@ -219,12 +249,55 @@ export class WebhookService {
         interactive_reply_id: interactiveReplyId,
       });
 
+      // --- CAMPAIGN ANALYTICS: TRACK REPLIES ---
+      let repliedCampaignId = null;
+      if (msg.context?.id) {
+        const originalMsg = await Message.findOneAndUpdate(
+          { whatsapp_message_id: msg.context.id },
+          { status: "replied" }
+        );
+        if (originalMsg?.campaign_id) repliedCampaignId = originalMsg.campaign_id;
+      } else {
+        const lastOutbound = await Message.findOne({
+          phone_number: from,
+          direction: "outbound"
+        }).sort({ createdAt: -1 });
+        if (lastOutbound?.campaign_id) {
+          repliedCampaignId = lastOutbound.campaign_id;
+          lastOutbound.status = "replied";
+          await lastOutbound.save();
+        }
+      }
+
+      if (repliedCampaignId) {
+        const updatedCampaign = await Campaign.findByIdAndUpdate(
+          repliedCampaignId,
+          { $inc: { replied_count: 1 } },
+          { new: true }
+        );
+        if (updatedCampaign) {
+          emitToUser(userId, "campaign_update", {
+            campaign_id: updatedCampaign._id,
+            stats: {
+              attempted: updatedCampaign.attempted_count,
+              accepted: updatedCampaign.accepted_count,
+              delivered: updatedCampaign.delivered_count,
+              read: updatedCampaign.read_count,
+              replied: updatedCampaign.replied_count,
+              failed: updatedCampaign.failed_count
+            }
+          });
+        }
+      }
+      // ------------------------------------------
+
       emitToUser(userId, "new_message", {
         message: newMsg,
         conversation: conversation,
         contact: contact,
       });
     } catch (e) {
+      console.error("[Webhook] processMessage error:", e);
       if (e.code !== 11000) throw e;
     }
 

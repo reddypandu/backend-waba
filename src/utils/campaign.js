@@ -231,13 +231,14 @@ async function processCampaignInBackground(campaign, waAccount) {
             },
           };
 
+          console.log("Sending campaign message to:", recipient);
           console.log("[Campaign] Sending template message", {
             campaign_id: campaign._id,
             contact_phone: contact.phone_number,
             recipient: recipient,
             endpoint: endpoint,
             method: "POST",
-            request_body: requestBody,
+            request_body: JSON.stringify(requestBody),
           });
 
           const r = await fetch(endpoint, {
