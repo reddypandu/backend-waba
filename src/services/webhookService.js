@@ -5,8 +5,6 @@ import Template from "../models/Template.js";
 import { AutoReply } from "../models/Automation.js";
 import Conversation from "../models/Conversation.js";
 import Campaign from "../models/Campaign.js";
-import { emitToUser } from "../socket.js";
-
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
 const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
@@ -102,13 +100,6 @@ export class WebhookService {
             );
 
             if (updatedMsg) {
-              emitToUser(updatedMsg.user_id, "message_status", {
-                message_id: updatedMsg._id,
-                whatsapp_message_id: s.id,
-                status: s.status,
-                error_details: statusUpdate.error_details,
-              });
-
               if (updatedMsg.campaign_id) {
                 const incObj = {};
                 if (s.status === "sent") incObj.accepted_count = 1;
@@ -120,20 +111,10 @@ export class WebhookService {
                   const updatedCampaign = await Campaign.findByIdAndUpdate(
                     updatedMsg.campaign_id,
                     { $inc: incObj },
-                    { new: true }
+                    { new: true },
                   );
                   if (updatedCampaign) {
-                    emitToUser(updatedMsg.user_id, "campaign_update", {
-                      campaign_id: updatedCampaign._id,
-                      stats: {
-                        attempted: updatedCampaign.attempted_count,
-                        accepted: updatedCampaign.accepted_count,
-                        delivered: updatedCampaign.delivered_count,
-                        read: updatedCampaign.read_count,
-                        replied: updatedCampaign.replied_count,
-                        failed: updatedCampaign.failed_count
-                      }
-                    });
+                    // Campaign stats are updated in database, no socket notification.
                   }
                 }
               }
@@ -254,13 +235,14 @@ export class WebhookService {
       if (msg.context?.id) {
         const originalMsg = await Message.findOneAndUpdate(
           { whatsapp_message_id: msg.context.id },
-          { status: "replied" }
+          { status: "replied" },
         );
-        if (originalMsg?.campaign_id) repliedCampaignId = originalMsg.campaign_id;
+        if (originalMsg?.campaign_id)
+          repliedCampaignId = originalMsg.campaign_id;
       } else {
         const lastOutbound = await Message.findOne({
           phone_number: from,
-          direction: "outbound"
+          direction: "outbound",
         }).sort({ createdAt: -1 });
         if (lastOutbound?.campaign_id) {
           repliedCampaignId = lastOutbound.campaign_id;
@@ -273,29 +255,15 @@ export class WebhookService {
         const updatedCampaign = await Campaign.findByIdAndUpdate(
           repliedCampaignId,
           { $inc: { replied_count: 1 } },
-          { new: true }
+          { new: true },
         );
         if (updatedCampaign) {
-          emitToUser(userId, "campaign_update", {
-            campaign_id: updatedCampaign._id,
-            stats: {
-              attempted: updatedCampaign.attempted_count,
-              accepted: updatedCampaign.accepted_count,
-              delivered: updatedCampaign.delivered_count,
-              read: updatedCampaign.read_count,
-              replied: updatedCampaign.replied_count,
-              failed: updatedCampaign.failed_count
-            }
-          });
+          // Campaign stats are updated in database, no socket notification.
         }
       }
       // ------------------------------------------
 
-      emitToUser(userId, "new_message", {
-        message: newMsg,
-        conversation: conversation,
-        contact: contact,
-      });
+      // Real-time socket notifications removed. Inbox will refresh by regular polling.
     } catch (e) {
       console.error("[Webhook] processMessage error:", e);
       if (e.code !== 11000) throw e;
