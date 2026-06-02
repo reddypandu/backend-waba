@@ -158,35 +158,67 @@ router.post("/", requireAuth, async (req, res) => {
     }
 
     if (action === "send_template") {
-      const {
+      let {
         to,
         template_name,
-        template_language = "en",
+        template_language,
         components,
         requires_follow_up = false,
       } = params;
-      const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
+
+      if (!template_language) {
+        const templateRecord = await Template.findOne({
+          user_id: userId,
+          name: template_name,
+        });
+        template_language = templateRecord?.language || "en_US";
+      }
+      const endpoint = `${META_API}/${phone_number_id}/messages`;
+      const requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: {
+          name: template_name,
+          language: { code: template_language },
+          components: components || [],
+        },
+      };
+
+      console.log("[Send Template] Request details", {
+        endpoint,
+        method: "POST",
+        request_body: requestBody,
+      });
+
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${access_token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "template",
-          template: {
-            name: template_name,
-            language: { code: template_language },
-            components: components || [],
-          },
-        }),
+        body: JSON.stringify(requestBody),
       });
       const data = await r.json();
-      if (!r.ok)
+
+      console.log("[Send Template] Response received", {
+        status: r.status,
+        ok: r.ok,
+        meta_response: data,
+      });
+
+      if (!r.ok) {
+        console.error("[Send Template] Failed", {
+          recipient: to,
+          error_code: data.error?.code,
+          error_message: data.error?.message,
+          error_subcode: data.error?.error_subcode,
+          error_data: data.error?.error_data,
+        });
         return res
           .status(400)
           .json({ error: data.error?.message || "Failed to send message" });
+      }
       const msgId = data.messages?.[0]?.id;
 
       // Ensure contact & conversation exist
@@ -258,24 +290,48 @@ router.post("/", requireAuth, async (req, res) => {
 
     if (action === "send_message") {
       const { to, content } = params;
-      const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
+      const endpoint = `${META_API}/${phone_number_id}/messages`;
+      const requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: content },
+      };
+
+      console.log("[Send Message] Request details", {
+        endpoint,
+        method: "POST",
+        request_body: requestBody,
+      });
+
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${access_token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "text",
-          text: { body: content },
-        }),
+        body: JSON.stringify(requestBody),
       });
       const data = await r.json();
-      if (!r.ok)
+
+      console.log("[Send Message] Response received", {
+        status: r.status,
+        ok: r.ok,
+        meta_response: data,
+      });
+
+      if (!r.ok) {
+        console.error("[Send Message] Failed", {
+          recipient: to,
+          error_code: data.error?.code,
+          error_message: data.error?.message,
+          error_subcode: data.error?.error_subcode,
+          error_data: data.error?.error_data,
+        });
         return res
           .status(400)
           .json({ error: data.error?.message || "Failed to send" });
+      }
 
       const msgId = data.messages?.[0]?.id;
       // Find or create conversation
@@ -607,8 +663,7 @@ router.post("/campaigns/:id/retarget", requireAuth, async (req, res) => {
 
     // Find messages that failed for this campaign
     const failedMessages = await Message.find({
-      campaign_id: new mongoose.Types.ObjectId(campaign._id),
-      user_id: new mongoose.Types.ObjectId(req.user.id),
+      campaign_id: campaign._id,
       status: "failed",
     });
     if (failedMessages.length === 0)
@@ -619,6 +674,12 @@ router.post("/campaigns/:id/retarget", requireAuth, async (req, res) => {
       });
 
     const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
+
+    const templateRecord = await Template.findOne({
+      user_id: req.user.id,
+      name: campaign.template_name,
+    });
+    const templateLanguage = templateRecord?.language || "en_US";
 
     let sent = 0;
     for (const msg of failedMessages) {
@@ -638,7 +699,7 @@ router.post("/campaigns/:id/retarget", requireAuth, async (req, res) => {
               type: "template",
               template: {
                 name: campaign.template_name,
-                language: { code: "en" },
+                language: { code: templateLanguage },
                 ...(components.length > 0 && { components }),
               },
             }),

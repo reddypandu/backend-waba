@@ -3,6 +3,7 @@ import Campaign from "../models/Campaign.js";
 import Message from "../models/Message.js";
 import Contact from "../models/Contact.js";
 import WhatsAppAccount from "../models/WhatsAppAccount.js";
+import Template from "../models/Template.js";
 import { sendCampaign } from "../utils/campaign.js"; // Existing bulk sender logic
 
 const toObjectId = (id) =>
@@ -328,7 +329,6 @@ export class CampaignController {
 
       const failedMessages = await Message.find({
         campaign_id: { $in: legacyIdValues(campaign._id.toString()) },
-        user_id: { $in: legacyIdValues(req.user.id) },
         status: "failed",
       });
       if (failedMessages.length === 0)
@@ -340,7 +340,13 @@ export class CampaignController {
 
       const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
       let sent = 0;
-      const META_API = "https://graph.facebook.com/v24.0";
+      const META_API = "https://graph.facebook.com/v22.0";
+
+      const templateRecord = await Template.findOne({
+        user_id: req.user.id,
+        name: campaign.template_name,
+      });
+      const templateLanguage = templateRecord?.language || "en_US";
 
       for (const msg of failedMessages) {
         try {
@@ -359,7 +365,7 @@ export class CampaignController {
                 type: "template",
                 template: {
                   name: campaign.template_name,
-                  language: { code: "en" },
+                  language: { code: templateLanguage },
                   ...(components.length > 0 && { components }),
                 },
               }),
@@ -373,6 +379,8 @@ export class CampaignController {
               whatsapp_message_id: data.messages?.[0]?.id,
               error_details: null,
             });
+          } else {
+            console.error("[Retarget] Meta API Error:", data);
           }
         } catch (_) {}
       }

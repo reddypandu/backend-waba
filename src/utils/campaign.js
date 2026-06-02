@@ -3,6 +3,7 @@ import Contact from "../models/Contact.js";
 import WhatsAppAccount from "../models/WhatsAppAccount.js";
 import Message from "../models/Message.js";
 import Conversation from "../models/Conversation.js";
+import Template from "../models/Template.js";
 
 const META_API = "https://graph.facebook.com/v22.0";
 const STALE_RUNNING_MS = 2 * 60 * 1000;
@@ -107,60 +108,13 @@ async function processCampaignInBackground(campaign, waAccount) {
     } = campaign;
     const contacts = await Contact.find({ _id: { $in: contact_ids } });
 
-    // Validate account can send messages before proceeding
-    try {
-      const checkRes = await fetch(
-        `${META_API}/${waAccount.phone_number_id}?fields=messaging_product,quality_rating,code_verification_status`,
-        { headers: { Authorization: `Bearer ${waAccount.access_token}` } },
-      );
-      const checkData = await checkRes.json();
+    // Removed GET /PHONE_NUMBER_ID account capability check per user request
 
-      console.log("[Campaign] Account messaging capability check", {
-        phone_number_id: waAccount.phone_number_id,
-        messaging_product: checkData.messaging_product,
-        quality_rating: checkData.quality_rating,
-        code_verification_status: checkData.code_verification_status,
-        error: checkData.error?.message || null,
-      });
-
-      if (!checkRes.ok) {
-        const errorMsg = formatMetaError(
-          checkData,
-          "Unable to verify account messaging capability",
-        );
-        console.error("[Campaign] Account check failed:", errorMsg);
-
-        // Mark all messages as failed with this error
-        for (const contact of contacts) {
-          await Message.create({
-            user_id: campaign.user_id,
-            contact_id: contact._id,
-            campaign_id: campaign._id,
-            direction: "outbound",
-            message_type: "template",
-            template_name,
-            content: `[Campaign Blocked: ${template_name}]`,
-            phone_number: contact.phone_number,
-            status: "failed",
-            error_details: `Account Setup Error: ${errorMsg}`,
-          }).catch((logErr) =>
-            console.error(
-              "[Campaign] Failed to record account error:",
-              logErr.message,
-            ),
-          );
-        }
-
-        campaign.status = "failed";
-        await campaign.save();
-        return;
-      }
-    } catch (checkErr) {
-      console.error(
-        "[Campaign] Account capability check exception:",
-        checkErr.message,
-      );
-    }
+    const templateRecord = await Template.findOne({
+      user_id: campaign.user_id,
+      name: template_name,
+    });
+    const templateLanguage = templateRecord?.language || "en_US";
 
     const componentsMap = new Map();
     if (templateComponents && Array.isArray(templateComponents)) {
@@ -263,29 +217,48 @@ async function processCampaignInBackground(campaign, waAccount) {
             { upsert: true, returnDocument: "after" },
           );
 
-          const r = await fetch(
-            `${META_API}/${waAccount.phone_number_id}/messages`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${waAccount.access_token}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                messaging_product: "whatsapp",
-                to: recipient,
-                type: "template",
-                template: {
-                  name: template_name,
-                  language: { code: "en" },
-                  ...(finalComponents.length > 0 && {
-                    components: finalComponents,
-                  }),
-                },
+          const endpoint = `${META_API}/${waAccount.phone_number_id}/messages`;
+          const requestBody = {
+            messaging_product: "whatsapp",
+            to: recipient,
+            type: "template",
+            template: {
+              name: template_name,
+              language: { code: templateLanguage },
+              ...(finalComponents.length > 0 && {
+                components: finalComponents,
               }),
             },
-          );
+          };
+
+          console.log("[Campaign] Sending template message", {
+            campaign_id: campaign._id,
+            contact_phone: contact.phone_number,
+            recipient: recipient,
+            endpoint: endpoint,
+            method: "POST",
+            request_body: requestBody,
+          });
+
+          const r = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${waAccount.access_token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(requestBody),
+          });
           const data = await r.json();
+
+          console.log("[Campaign] Message send response", {
+            campaign_id: campaign._id,
+            contact_phone: contact.phone_number,
+            recipient: recipient,
+            status: r.status,
+            ok: r.ok,
+            meta_response: data,
+          });
+
           const msgId = data.messages?.[0]?.id;
 
           // Extract media URL for history

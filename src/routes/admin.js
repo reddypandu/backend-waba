@@ -220,8 +220,14 @@ router.get("/users/:id", requireAuth, async (req, res) => {
       Campaign.countDocuments(legacyUserIdFilter(targetUserId)),
       Template.countDocuments(legacyUserIdFilter(targetUserId)),
       Message.countDocuments(legacyUserIdFilter(targetUserId)),
-      Message.countDocuments({ ...legacyUserIdFilter(targetUserId), direction: "inbound" }),
-      Message.countDocuments({ ...legacyUserIdFilter(targetUserId), direction: "outbound" }),
+      Message.countDocuments({
+        ...legacyUserIdFilter(targetUserId),
+        direction: "inbound",
+      }),
+      Message.countDocuments({
+        ...legacyUserIdFilter(targetUserId),
+        direction: "outbound",
+      }),
     ]);
     const transactions = await WalletTransaction.find({ user_id: targetUserId })
       .sort({ createdAt: -1 })
@@ -728,7 +734,10 @@ router.post("/whatsapp-accounts", requireAuth, async (req, res) => {
         dashboard_status: registrationResult.dashboard_status,
       });
     } catch (syncErr) {
-      console.warn(`[Manual Setup] Status sync/register failed:`, syncErr.message);
+      console.warn(
+        `[Manual Setup] Status sync/register failed:`,
+        syncErr.message,
+      );
     }
 
     res.json({ success: true, id: wa._id });
@@ -762,22 +771,37 @@ router.get("/whatsapp-profile", requireAuth, async (req, res) => {
     if (!wa || !wa.phone_number_id) return res.json({}); // Default empty if not set up
 
     // Fetch profile from Meta
-    const r = await fetch(
-      `https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`,
-      {
-        headers: { Authorization: `Bearer ${wa.access_token}` },
-      },
-    );
+    const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
+    const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
+    const endpoint = `${META_API}/${wa.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`;
+
+    console.log("[Meta Profile Fetch] Request details", {
+      endpoint,
+      method: "GET",
+      phone_number_id: wa.phone_number_id,
+      graph_version: GRAPH_VERSION,
+    });
+
+    const r = await fetch(endpoint, {
+      headers: { Authorization: `Bearer ${wa.access_token}` },
+    });
     const data = await r.json();
-    console.log(
-      "[Meta Profile Fetch] Status:",
-      r.status,
-      "Payload:",
-      JSON.stringify(data),
-    );
+
+    console.log("[Meta Profile Fetch] Response received", {
+      status: r.status,
+      ok: r.ok,
+      has_error: !!data.error,
+      error_code: data.error?.code,
+      error_message: data.error?.message,
+    });
 
     if (!r.ok) {
-      console.error("Meta Profile Sync Error:", data.error);
+      console.error("[Meta Profile Sync Error] Failed to fetch profile", {
+        status: r.status,
+        error_code: data.error?.code,
+        error_message: data.error?.message,
+        error_subcode: data.error?.error_subcode,
+      });
       if (forceSync) {
         return res
           .status(400)
@@ -838,29 +862,53 @@ router.post("/whatsapp-profile", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "WhatsApp not configured" });
 
     const { about, address, description, email, websites, vertical } = req.body;
+    const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
+    const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
+    const endpoint = `${META_API}/${wa.phone_number_id}/whatsapp_business_profile`;
+    const requestBody = {
+      messaging_product: "whatsapp",
+      about,
+      address,
+      description,
+      email,
+      websites,
+      vertical,
+    };
+
+    console.log("[Meta Profile Update] Request details", {
+      endpoint,
+      method: "POST",
+      phone_number_id: wa.phone_number_id,
+      graph_version: GRAPH_VERSION,
+      body_keys: Object.keys(requestBody),
+    });
 
     // Update Meta Profile
-    const r = await fetch(
-      `https://graph.facebook.com/v24.0/${wa.phone_number_id}/whatsapp_business_profile`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${wa.access_token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          about,
-          address,
-          description,
-          email,
-          websites,
-          vertical,
-        }),
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${wa.access_token}`,
+        "Content-Type": "application/json",
       },
-    );
+      body: JSON.stringify(requestBody),
+    });
     const data = await r.json();
-    if (!r.ok) throw new Error(data.error?.message || "Meta API error");
+
+    console.log("[Meta Profile Update] Response received", {
+      status: r.status,
+      ok: r.ok,
+      error_code: data.error?.code,
+      error_message: data.error?.message,
+    });
+
+    if (!r.ok) {
+      console.error("[Meta Profile Update] Failed", {
+        error_message: data.error?.message,
+        error_code: data.error?.code,
+        error_subcode: data.error?.error_subcode,
+      });
+      throw new Error(data.error?.message || "Meta API error");
+    }
 
     // Save to DB locally
     await Business.findOneAndUpdate(
@@ -889,27 +937,43 @@ router.post(
         return res.status(404).json({ error: "WhatsApp not configured" });
 
       const appId = process.env.META_APP_ID;
+      const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
+      const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
+      const uploadEndpoint = `${META_API}/${appId}/uploads?file_length=${file.size}&file_type=${file.mimetype}&access_token=${wa.access_token}`;
 
-      const sessRes = await fetch(
-        `https://graph.facebook.com/v24.0/${appId}/uploads?file_length=${file.size}&file_type=${file.mimetype}&access_token=${wa.access_token}`,
-        {
-          method: "POST",
-        },
-      );
+      console.log("[Profile Picture Upload] Request details", {
+        endpoint:
+          uploadEndpoint.split("&access_token")[0] + "&access_token=***",
+        method: "POST",
+        app_id: appId,
+        file_size: file.size,
+        file_type: file.mimetype,
+        graph_version: GRAPH_VERSION,
+      });
+
+      const sessRes = await fetch(uploadEndpoint, {
+        method: "POST",
+      });
       const sessData = await sessRes.json();
       if (sessData.error) throw new Error(sessData.error.message);
 
-      const upRes = await fetch(
-        `https://graph.facebook.com/v24.0/${sessData.id}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `OAuth ${wa.access_token}`,
-            file_offset: "0",
-          },
-          body: file.buffer,
+      const uploadSessionId = sessData.id;
+      const uploadSessionEndpoint = `${META_API}/${uploadSessionId}`;
+
+      console.log("[Profile Picture Upload] Session created", {
+        session_id: uploadSessionId,
+        endpoint: uploadSessionEndpoint,
+        method: "POST",
+      });
+
+      const upRes = await fetch(uploadSessionEndpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `OAuth ${wa.access_token}`,
+          file_offset: "0",
         },
-      );
+        body: file.buffer,
+      });
       const upData = await upRes.json();
       if (upData.error) throw new Error(upData.error.message);
 
@@ -1010,7 +1074,8 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
         phone_number: waAccount.phone_number,
         phone_number_id: waAccount.phone_number_id,
         waba_id: waAccount.waba_id,
-        meta_wa_status: waAccount.meta_wa_status || waAccount.verification_status,
+        meta_wa_status:
+          waAccount.meta_wa_status || waAccount.verification_status,
         is_meta_test_number: waAccount.is_meta_test_number || false,
         was_messaging: waAccount.was_messaging || false,
         dashboard_status: getDashboardStatus(waAccount),
@@ -1059,20 +1124,23 @@ router.get("/whatsapp-status/sync", requireAuth, async (req, res) => {
       dashboard_status: dashboardStatus,
       should_register: syncResult.shouldRegister,
       registration_state: syncResult.registrationState,
-      registration_error: updated?.registration_error || waAccount.registration_error,
+      registration_error:
+        updated?.registration_error || waAccount.registration_error,
       registration_attempt_count:
-        updated?.registration_attempt_count || waAccount.registration_attempt_count || 0,
+        updated?.registration_attempt_count ||
+        waAccount.registration_attempt_count ||
+        0,
       last_synced: syncResult.timestamp,
       message: syncResult.rateLimited
         ? syncResult.error
         : syncResult.shouldRegister
           ? "Phone number needs registration. Call /register API to complete setup."
           : syncResult.isTestNumber
-          ? "This is a Meta test number for development/testing only."
-          : "Account status synced from Meta. " +
-            (syncResult.isMessaging
-              ? "Messaging is working."
-              : "Waiting for first message."),
+            ? "This is a Meta test number for development/testing only."
+            : "Account status synced from Meta. " +
+              (syncResult.isMessaging
+                ? "Messaging is working."
+                : "Waiting for first message."),
     });
   } catch (err) {
     console.error("[Whatsapp Status] Error:", err);
