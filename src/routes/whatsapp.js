@@ -166,6 +166,8 @@ router.post("/", requireAuth, async (req, res) => {
         requires_follow_up = false,
       } = params;
 
+      to = to.replace(/\D/g, "");
+
       if (!template_language) {
         const templateRecord = await Template.findOne({
           user_id: userId,
@@ -229,9 +231,10 @@ router.post("/", requireAuth, async (req, res) => {
       );
 
       const conv = await Conversation.findOneAndUpdate(
-        { user_id: userId, contact_id: contact._id, phone_number: to },
+        { user_id: userId, contact_id: contact._id },
         {
           $set: {
+            phone_number: to,
             last_message: `[Template: ${template_name}]`,
             last_message_at: new Date(),
           },
@@ -289,7 +292,9 @@ router.post("/", requireAuth, async (req, res) => {
     }
 
     if (action === "send_message") {
-      const { to, content } = params;
+      let { to, content } = params;
+      to = to.replace(/\D/g, "");
+
       const endpoint = `${META_API}/${phone_number_id}/messages`;
       const requestBody = {
         messaging_product: "whatsapp",
@@ -343,8 +348,8 @@ router.post("/", requireAuth, async (req, res) => {
       );
 
       const conv = await Conversation.findOneAndUpdate(
-        { user_id: userId, contact_id: contact._id, phone_number: to },
-        { $set: { last_message: content, last_message_at: new Date() } },
+        { user_id: userId, contact_id: contact._id },
+        { $set: { phone_number: to, last_message: content, last_message_at: new Date() } },
         { upsert: true, new: true },
       );
 

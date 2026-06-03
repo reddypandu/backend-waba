@@ -82,22 +82,46 @@ export class WebhookService {
         // 2a. Message Status Updates (Delivery Receipts)
         if (value.statuses) {
           for (const s of value.statuses) {
-            const statusUpdate = { status: s.status };
+            let sStatus = s.status;
+            let statusUpdate = { status: sStatus };
             if (s.errors && s.errors.length > 0) {
               statusUpdate.error_details = formatWebhookError(s.errors[0]);
-              console.log(
-                `[Webhook Status] ❌ Message ${s.id} failed: ${s.errors[0].message}`,
-              );
+              console.log(`[Webhook Status] ❌ Message ${s.id} failed: ${s.errors[0].message}`);
+              sStatus = 'failed';
+              statusUpdate.status = 'failed';
             }
-            if (s.status === "delivered")
-              statusUpdate.delivered_at = new Date();
-            if (s.status === "read") statusUpdate.read_at = new Date();
+            if (sStatus === "delivered") statusUpdate.delivered_at = new Date();
+            if (sStatus === "read") statusUpdate.read_at = new Date();
 
-            const updatedMsg = await Message.findOneAndUpdate(
-              { whatsapp_message_id: s.id },
-              statusUpdate,
-              { new: true },
-            );
+            const hierarchy = { queued: 0, sent: 1, delivered: 2, read: 3, replied: 4, failed: 5 };
+            
+            // Handle Race Condition: Webhook might arrive before Message.create finishes
+            let currentMsg = await Message.findOne({ whatsapp_message_id: s.id });
+            if (!currentMsg) {
+              console.log(`[Webhook] Message ${s.id} not found, retrying in 1s...`);
+              await new Promise(res => setTimeout(res, 1000));
+              currentMsg = await Message.findOne({ whatsapp_message_id: s.id });
+            }
+
+            let updatedMsg = null;
+            if (currentMsg) {
+              const currentLevel = hierarchy[currentMsg.status] || 0;
+              const newLevel = hierarchy[sStatus] || 0;
+              
+              if (newLevel > currentLevel || sStatus === 'failed') {
+                updatedMsg = await Message.findOneAndUpdate(
+                  { whatsapp_message_id: s.id },
+                  statusUpdate,
+                  { new: true }
+                );
+              } else {
+                // Keep existing status but update timestamps if applicable
+                if (sStatus === 'delivered' && !currentMsg.delivered_at) {
+                  await Message.updateOne({ whatsapp_message_id: s.id }, { delivered_at: new Date() });
+                }
+                updatedMsg = currentMsg;
+              }
+            }
 
             if (updatedMsg) {
               if (updatedMsg.campaign_id) {

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
 import { WebhookService } from '../services/webhookService.js';
 
@@ -21,9 +22,14 @@ export class WebhookController {
       const body = req.body;
       const rawBody = req.rawBody || JSON.stringify(body);
       
-      console.log("[Webhook] Incoming payload:\n", JSON.stringify(body, null, 2));
-
       const sig = req.headers['x-hub-signature-256'];
+      try {
+        fs.appendFileSync('webhook_debug.log', JSON.stringify({ time: new Date(), body: req.body, sig }) + '\n');
+      } catch (err) {
+        console.error('Failed to log webhook:', err);
+      }
+      
+      console.log("[Webhook] Incoming payload:\n", JSON.stringify(body, null, 2));
 
       if (process.env.META_APP_SECRET && sig) {
         const expected = 'sha256=' + crypto.createHmac('sha256', process.env.META_APP_SECRET).update(rawBody).digest('hex');
