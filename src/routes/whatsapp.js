@@ -349,7 +349,13 @@ router.post("/", requireAuth, async (req, res) => {
 
       const conv = await Conversation.findOneAndUpdate(
         { user_id: userId, contact_id: contact._id },
-        { $set: { phone_number: to, last_message: content, last_message_at: new Date() } },
+        {
+          $set: {
+            phone_number: to,
+            last_message: content,
+            last_message_at: new Date(),
+          },
+        },
         { upsert: true, new: true },
       );
 
@@ -533,6 +539,37 @@ router.get("/campaigns", requireAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+router.get("/subscribe-all-accounts", async (req, res) => {
+  const accounts = await WhatsAppAccount.find({});
+
+  const results = [];
+
+  for (const acc of accounts) {
+    const token = acc.access_token || process.env.META_PERMANENT_TOKEN;
+
+    const r = await fetch(
+      `https://graph.facebook.com/v22.0/${acc.waba_id}/subscribed_apps`,
+      {
+        method: "POST",
+
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+
+    const data = await r.json();
+
+    results.push({
+      waba_id: acc.waba_id,
+      phone: acc.phone_number,
+      result: data,
+    });
+
+    console.log(`[Subscribe] WABA ${acc.waba_id}:`, data);
+  }
+
+  res.json({ success: true, results });
 });
 
 router.get("/campaigns/:id", requireAuth, async (req, res) => {
