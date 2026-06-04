@@ -11,14 +11,7 @@ router.get("/", WebhookController.verify);
 
 // ── POST: Inbound events ────────────────────────────────────
 
-router.post(
-  "/",
-  (req, res, next) => {
-    console.log("[WEBHOOK RECEIVED]", JSON.stringify(req.body, null, 2));
-
-    next();
-  },
-  WebhookController.handleWebhook,
-);
+// Simplified - same result
+router.post("/", WebhookController.handleWebhook);
 
 export default router;
