@@ -75,5 +75,99 @@ router.delete("/keys", requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// ── Public API Endpoints (requires API key) ───────────────────────────────────
+
+router.post("/send-template", apiKeyAuth, async (req, res) => {
+  try {
+    let { to, template_name, components = [] } = req.body;
+
+    if (!to) return res.status(400).json({ error: "to is required" });
+    if (!template_name) return res.status(400).json({ error: "template_name is required" });
+
+    to = to.replace(/\D/g, "");
+
+    const { access_token, phone_number_id } = req.waAccount;
+    const userId = req.apiUser.user_id;
+
+    // Get template language
+    const templateRecord = await Template.findOne({
+      user_id: userId,
+      name: template_name
+    });
+    const language = templateRecord?.language || "en_US";
+
+    // Send via Meta API
+    const r = await fetch(`${META_API}/${phone_number_id}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: {
+          name: template_name,
+          language: { code: language },
+          components
+        }
+      })
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return res.status(400).json({
+        error: data.error?.message || "Failed to send template"
+      });
+    }
+
+    const msgId = data.messages?.[0]?.id;
+
+    // Save contact + conversation + message
+    const contact = await Contact.findOneAndUpdate(
+      { user_id: userId, phone_number: to },
+      { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
+      { upsert: true, new: true }
+    );
+
+    const conv = await Conversation.findOneAndUpdate(
+      { user_id: userId, contact_id: contact._id },
+      {
+        $set: {
+          phone_number: to,
+          last_message: `[Template: ${template_name}]`,
+          last_message_at: new Date()
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    await Message.create({
+      user_id: userId,
+      conversation_id: conv._id,
+      contact_id: contact._id,
+      direction: "outbound",
+      message_type: "template",
+      template_name,
+      content: `[Template: ${template_name}]`,
+      phone_number: to,
+      whatsapp_message_id: msgId,
+      status: "sent"
+    });
+
+    res.json({
+      success: true,
+      message_id: msgId,
+      to,
+      template_name
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
 
 export default router;
