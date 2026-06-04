@@ -6,11 +6,20 @@ import Template from "../models/Template.js";
 import Contact from "../models/Contact.js";
 import Conversation from "../models/Conversation.js";
 import Message from "../models/Message.js";
+import cors from "cors";
 
 const router = Router();
 const META_API = "https://graph.facebook.com/v22.0";
 
 // ── Key Management (requires user login) ─────────────────────────────────────
+// Allow all origins for public API
+router.use(cors({
+  origin: "*",
+  methods: ["POST", "GET", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+router.options("*", cors());
 
 // Generate or get existing API key
 router.post("/keys/generate", requireAuth, async (req, res) => {
