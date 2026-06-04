@@ -19,6 +19,7 @@ import campaignsRoutes from "./routes/campaigns.js";
 import teamRoutes from "./routes/team.js";
 import automationRoutes from "./routes/automation.js";
 import { startCampaignWorker } from "./workers/campaignWorker.js";
+import publicApiRoutes from "./routes/publicApi.js";
 
 // Register Models
 import "./models/User.js";
@@ -31,6 +32,7 @@ import "./models/WhatsAppAccount.js";
 import "./models/Business.js";
 import "./models/Design.js";
 import "./models/Upload.js";
+import "./models/ApiKey.js"; // add with other model imports
 
 // Connect to MongoDB
 connectDB();
@@ -107,6 +109,7 @@ app.use("/api/contacts", contactsRoutes);
 app.use("/api/campaigns", campaignsRoutes);
 app.use("/api/team", teamRoutes);
 app.use("/api/automation", automationRoutes);
+app.use("/api/v1", publicApiRoutes);
 
 app.get("/", (req, res) =>
   res.json({
