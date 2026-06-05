@@ -13,11 +13,13 @@ const META_API = "https://graph.facebook.com/v22.0";
 
 // ── Key Management (requires user login) ─────────────────────────────────────
 // Allow all origins for public API
-router.use(cors({
-  origin: "*",
-  methods: ["POST", "GET", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+router.use(
+  cors({
+    origin: "*",
+    methods: ["POST", "GET", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
 router.options("*", cors());
 
@@ -91,7 +93,8 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
     let { to, template_name, components = [] } = req.body;
 
     if (!to) return res.status(400).json({ error: "to is required" });
-    if (!template_name) return res.status(400).json({ error: "template_name is required" });
+    if (!template_name)
+      return res.status(400).json({ error: "template_name is required" });
 
     to = to.replace(/\D/g, "");
 
@@ -101,7 +104,7 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
     // Get template language
     const templateRecord = await Template.findOne({
       user_id: userId,
-      name: template_name
+      name: template_name,
     });
     const language = templateRecord?.language || "en_US";
 
@@ -110,7 +113,7 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
       method: "POST",
       headers: {
         Authorization: `Bearer ${access_token}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
@@ -119,15 +122,15 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
         template: {
           name: template_name,
           language: { code: language },
-          components
-        }
-      })
+          components,
+        },
+      }),
     });
 
     const data = await r.json();
     if (!r.ok) {
       return res.status(400).json({
-        error: data.error?.message || "Failed to send template"
+        error: data.error?.message || "Failed to send template",
       });
     }
 
@@ -137,7 +140,7 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
     const contact = await Contact.findOneAndUpdate(
       { user_id: userId, phone_number: to },
       { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
-      { upsert: true, new: true }
+      { upsert: true, new: true },
     );
 
     const conv = await Conversation.findOneAndUpdate(
@@ -146,10 +149,10 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
         $set: {
           phone_number: to,
           last_message: `[Template: ${template_name}]`,
-          last_message_at: new Date()
-        }
+          last_message_at: new Date(),
+        },
       },
-      { upsert: true, new: true }
+      { upsert: true, new: true },
     );
 
     await Message.create({
@@ -162,21 +165,18 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
       content: `[Template: ${template_name}]`,
       phone_number: to,
       whatsapp_message_id: msgId,
-      status: "sent"
+      status: "sent",
     });
 
     res.json({
       success: true,
       message_id: msgId,
       to,
-      template_name
+      template_name,
     });
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
-export default router;
 
 export default router;
