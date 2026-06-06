@@ -113,7 +113,7 @@ router.post('/signup', async (req, res) => {
       password: hashedPassword,
       full_name: full_name || '',
       role: 'user',
-      subscription: { plan: 'free', status: 'active', messages_used: 0, start_date: new Date() },
+      subscription: { plan: 'starter', status: 'active', messages_used: 0, start_date: new Date() },
       wallet: { balance: 0 },
     });
 

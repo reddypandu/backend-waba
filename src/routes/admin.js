@@ -138,6 +138,125 @@ router.get("/me", requireAuth, async (req, res) => {
       dashboardStatus = getDashboardStatus(accountWithMessaging);
     }
 
+    const daysRequested = [7, 30, 90].includes(parseInt(req.query.days, 10))
+      ? parseInt(req.query.days, 10)
+      : 30;
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - daysRequested + 1);
+
+    const messageStatsAgg = await Message.aggregate([
+      {
+        $match: {
+          ...legacyUserIdFilter(userId),
+          direction: "outbound",
+          createdAt: { $gte: sinceDate },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          sent: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["sent", "delivered", "read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          delivered: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["delivered", "read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          read: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          failed: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "failed"] }, 1, 0],
+            },
+          },
+        },
+      },
+    ]);
+
+    const messageStats = messageStatsAgg[0] || {
+      total: 0,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      failed: 0,
+    };
+
+    const dailyMessages = await Message.aggregate([
+      {
+        $match: {
+          ...legacyUserIdFilter(userId),
+          direction: "outbound",
+          createdAt: { $gte: sinceDate },
+        },
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          sent: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    const dailyMap = Object.fromEntries(
+      dailyMessages.map((item) => [item._id, item.sent]),
+    );
+
+    const chartData = [];
+    for (let i = 0; i < daysRequested; i += 1) {
+      const currentDate = new Date(sinceDate);
+      currentDate.setDate(sinceDate.getDate() + i);
+      const isoDate = currentDate.toISOString().slice(0, 10);
+      chartData.push({
+        name: currentDate.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        }),
+        sent: dailyMap[isoDate] || 0,
+      });
+    }
+
+    const usageStartDate = user.subscription?.start_date
+      ? new Date(user.subscription.start_date)
+      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const messagesUsed = await Message.countDocuments({
+      ...legacyUserIdFilter(userId),
+      direction: 'outbound',
+      createdAt: { $gte: usageStartDate },
+    });
+
+    const subscription = {
+      plan: user.subscription?.plan || 'starter',
+      status: user.subscription?.status || 'active',
+      messages_used: messagesUsed,
+      start_date: user.subscription?.start_date || new Date(),
+      end_date: user.subscription?.end_date,
+    };
+
+    if (!user.subscription?.plan) {
+      await User.findByIdAndUpdate(userId, { subscription }, { new: true });
+    }
+
     res.json({
       user: {
         id: user._id,
@@ -145,7 +264,7 @@ router.get("/me", requireAuth, async (req, res) => {
         full_name: user.full_name,
         role: user.role,
       },
-      subscription: user.subscription,
+      subscription,
       wallet: user.wallet,
       waAccount,
       dashboardStatus,
@@ -155,6 +274,8 @@ router.get("/me", requireAuth, async (req, res) => {
         campaigns: campaignCount,
         templates: templateCount,
       },
+      messageStats,
+      chartData,
       transactions,
     });
   } catch (err) {
@@ -175,20 +296,33 @@ router.get("/users", requireAuth, async (req, res) => {
     const usersWithWA = await Promise.all(
       users.map(async (u) => {
         const wa = await WhatsAppAccount.findOne({ user_id: u._id });
+        const userObject = u.toObject();
+        if (userObject.role === "admin") {
+          userObject.subscription = undefined;
+        } else if (!userObject.subscription?.plan) {
+          userObject.subscription = {
+            plan: "starter",
+            status: "active",
+            messages_used: 0,
+            start_date: userObject.subscription?.start_date || new Date(),
+          };
+        }
         return {
-          ...u.toObject(),
+          ...userObject,
           wa_connected: !!wa?.phone_number_id,
           wa_phone: wa?.phone_number || "",
         };
       }),
     );
 
+    const activeUsers = users.filter((u) => u.role !== "admin");
     const stats = {
       total_users: users.length,
-      total_free: users.filter((u) => u.subscription?.plan === "free").length,
-      total_starter: users.filter((u) => u.subscription?.plan === "starter")
-        .length,
-      total_pro: users.filter((u) => u.subscription?.plan === "pro").length,
+      total_free: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "free").length,
+      total_starter: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "starter").length,
+      total_growth: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "growth").length,
+      total_pro: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "starter")).length,
+      total_professional: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "starter")).length,
     };
 
     res.json({ users: usersWithWA, stats });
