@@ -217,6 +217,22 @@ async function processCampaignInBackground(campaign, waAccount) {
             { upsert: true, returnDocument: "after" },
           );
 
+          // Deep clone components to replace variables per-contact
+          const contactComponents = JSON.parse(JSON.stringify(finalComponents));
+          contactComponents.forEach(comp => {
+            if (comp.parameters) {
+              comp.parameters.forEach(param => {
+                if (param.type === 'text' && typeof param.text === 'string') {
+                  param.text = param.text.replace(/\{\{name(?:\|([^}]*))?\}\}/gi, (match, fallback) => {
+                    const cName = contact.name?.trim();
+                    const isValidName = cName && cName.toLowerCase() !== "user" && cName !== contact.phone_number;
+                    return isValidName ? cName : (fallback || "");
+                  });
+                }
+              });
+            }
+          });
+
           const endpoint = `${META_API}/${waAccount.phone_number_id}/messages`;
           const requestBody = {
             messaging_product: "whatsapp",
@@ -225,8 +241,8 @@ async function processCampaignInBackground(campaign, waAccount) {
             template: {
               name: template_name,
               language: { code: templateLanguage },
-              ...(finalComponents.length > 0 && {
-                components: finalComponents,
+              ...(contactComponents.length > 0 && {
+                components: contactComponents,
               }),
             },
           };

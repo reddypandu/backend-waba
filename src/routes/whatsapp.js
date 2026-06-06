@@ -175,6 +175,32 @@ router.post("/", requireAuth, async (req, res) => {
         });
         template_language = templateRecord?.language || "en_US";
       }
+      // Ensure contact & conversation exist FIRST
+      let contact = await Contact.findOne({ user_id: userId, phone_number: to });
+      if (!contact && to.length >= 10) {
+        // Try to find a matching contact with a country code prefix
+        contact = await Contact.findOne({ user_id: userId, phone_number: { $regex: new RegExp(to + '$') } });
+      }
+      if (!contact) {
+        contact = await Contact.create({ user_id: userId, phone_number: to, name: to });
+      }
+
+      // Deep clone components to replace variables per-contact
+      const contactComponents = JSON.parse(JSON.stringify(components || []));
+      contactComponents.forEach(comp => {
+        if (comp.parameters) {
+          comp.parameters.forEach(param => {
+            if (param.type === 'text' && typeof param.text === 'string') {
+              param.text = param.text.replace(/\{\{name(?:\|([^}]*))?\}\}/gi, (match, fallback) => {
+                const cName = contact.name?.trim();
+                const isValidName = cName && cName.toLowerCase() !== "user" && cName !== contact.phone_number;
+                return isValidName ? cName : (fallback || "");
+              });
+            }
+          });
+        }
+      });
+
       const endpoint = `${META_API}/${phone_number_id}/messages`;
       const requestBody = {
         messaging_product: "whatsapp",
@@ -183,7 +209,7 @@ router.post("/", requireAuth, async (req, res) => {
         template: {
           name: template_name,
           language: { code: template_language },
-          components: components || [],
+          components: contactComponents,
         },
       };
 
@@ -222,13 +248,6 @@ router.post("/", requireAuth, async (req, res) => {
           .json({ error: data.error?.message || "Failed to send message" });
       }
       const msgId = data.messages?.[0]?.id;
-
-      // Ensure contact & conversation exist
-      const contact = await Contact.findOneAndUpdate(
-        { user_id: userId, phone_number: to },
-        { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
-        { upsert: true, new: true },
-      );
 
       const conv = await Conversation.findOneAndUpdate(
         { user_id: userId, contact_id: contact._id },
