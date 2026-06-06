@@ -39,6 +39,13 @@ const classifyPhoneStatus = (
 ) => {
   if (isMessaging) return "connected";
 
+  // If Meta API explicitly says the number is connected, trust it.
+  // This happens if the number was previously registered (e.g. manually or via another app)
+  // and avoids redundant (and failing) registration attempts for new users.
+  if (phoneData?.status === "CONNECTED") {
+    return "connected";
+  }
+
   // If the database already knows it's connected, and it's not disconnected from Meta, keep it connected.
   if (
     dbStatus === "connected" &&
@@ -250,13 +257,14 @@ export async function updateAccountWithMetaStatus(waAccount, syncResult) {
       meta_error_message: syncResult.error || syncResult.profileError || null,
     };
 
-    if (!syncResult.rateLimited) {
+    if (!syncResult.rateLimited && syncResult.metaStatus) {
       updateData.meta_wa_status = syncResult.metaStatus;
     }
 
     // Only update phone_number if we have actual display_phone_number from Meta API
-    // Don't fallback to phone_number_id as that's not a real phone number
-    if (syncResult.displayPhoneNumber) {
+    // If we have a stored phone number already, don't overwrite it with empty/undefined
+    const hasValidNewNumber = syncResult.displayPhoneNumber && syncResult.displayPhoneNumber.length > 5;
+    if (hasValidNewNumber) {
       updateData.phone_number = syncResult.displayPhoneNumber;
     }
 

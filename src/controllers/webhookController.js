@@ -7,10 +7,13 @@ export class WebhookController {
   
   static async verify(req, res) {
     const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
+    console.log(`[Webhook Verify] Mode: ${mode}, Token: ${token}`);
+
     if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-      await WhatsAppAccount.updateMany({}, { webhook_verified: true }).catch(() => {});
+      console.log("[Webhook Verify] Verification successful!");
       return res.send(challenge);
     }
+    console.error("[Webhook Verify] Verification failed. Token mismatch.");
     res.status(403).send('Forbidden');
   }
 

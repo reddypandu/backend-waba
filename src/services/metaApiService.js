@@ -135,7 +135,7 @@ export class MetaApiService {
 
   static async getPhoneNumber(phoneNumberId, accessToken) {
     const res = await this.graphGet(
-      `${phoneNumberId}?fields=id,display_phone_number,verified_name,name,quality_rating,code_verification_status`,
+      `${phoneNumberId}?fields=id,display_phone_number,verified_name,name,quality_rating,code_verification_status,status`,
       accessToken,
     );
     if (!res.ok) {
@@ -166,7 +166,7 @@ export class MetaApiService {
 
   static async getWabaPhoneNumbers(wabaId, accessToken) {
     const res = await this.graphGet(
-      `${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,name,quality_rating,code_verification_status&limit=50`,
+      `${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,name,quality_rating,code_verification_status,status&limit=50`,
       accessToken,
     );
     if (!res.ok) {
