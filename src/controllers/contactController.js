@@ -1,6 +1,7 @@
 import fs from 'fs';
 import csv from 'csv-parser';
 import Contact from '../models/Contact.js';
+import { normalizePhone } from '../utils/phoneUtils.js';
 
 export class ContactController {
   
@@ -19,8 +20,8 @@ export class ContactController {
       const { name, phone_number, email, tags, opt_in_status, custom_attributes } = req.body;
       if (!phone_number) return res.status(400).json({ error: 'Phone number is required' });
 
-      // Clean phone number (remove non-digits, etc)
-      const cleanedPhone = phone_number.replace(/\D/g, '');
+      // Normalize phone number (handle country codes, convert 10-digit to 91+10-digit)
+      const cleanedPhone = normalizePhone(phone_number);
 
       const contact = await Contact.findOneAndUpdate(
         { user_id: req.user.id, phone_number: cleanedPhone },
@@ -75,7 +76,7 @@ export class ContactController {
             failCount++;
             continue;
         }
-        phone = phone.replace(/\D/g, ''); // strip non-digits
+        phone = normalizePhone(phone); // normalize phone number with country code handling
 
         const name = nameIdx !== -1 ? columns[nameIdx]?.trim() : '';
         const email = emailIdx !== -1 ? columns[emailIdx]?.trim() : '';

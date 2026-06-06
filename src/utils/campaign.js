@@ -4,11 +4,10 @@ import WhatsAppAccount from "../models/WhatsAppAccount.js";
 import Message from "../models/Message.js";
 import Conversation from "../models/Conversation.js";
 import Template from "../models/Template.js";
+import { normalizePhone } from "./phoneUtils.js";
 
 const META_API = "https://graph.facebook.com/v22.0";
 const STALE_RUNNING_MS = 2 * 60 * 1000;
-
-const normalizePhoneNumber = (value = "") => String(value).replace(/\D/g, "");
 
 const formatMetaError = (data, fallback = "Meta API Error") => {
   const error = data?.error;
@@ -182,7 +181,7 @@ async function processCampaignInBackground(campaign, waAccount) {
       const batch = contacts.slice(i, i + BATCH_SIZE);
 
       const batchPromises = batch.map(async (contact) => {
-        const recipient = normalizePhoneNumber(contact.phone_number);
+        const recipient = normalizePhone(contact.phone_number);
         let conversation = null;
 
         try {

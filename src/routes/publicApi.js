@@ -6,6 +6,7 @@ import Template from "../models/Template.js";
 import Contact from "../models/Contact.js";
 import Conversation from "../models/Conversation.js";
 import Message from "../models/Message.js";
+import { normalizePhone } from "../utils/phoneUtils.js";
 import cors from "cors";
 
 const router = Router();
@@ -96,7 +97,7 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
     if (!template_name)
       return res.status(400).json({ error: "template_name is required" });
 
-    to = to.replace(/\D/g, "");
+    to = normalizePhone(to);
 
     const { access_token, phone_number_id } = req.waAccount;
     const userId = req.apiUser.user_id;
@@ -136,7 +137,7 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
 
     const msgId = data.messages?.[0]?.id;
 
-    // Save contact + conversation + message
+    // Save contact + conversation + message (phone already normalized)
     const contact = await Contact.findOneAndUpdate(
       { user_id: userId, phone_number: to },
       { $setOnInsert: { user_id: userId, phone_number: to, name: to } },

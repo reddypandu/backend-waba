@@ -13,6 +13,7 @@ import User from "../models/User.js";
 import Conversation from "../models/Conversation.js";
 import { sendCampaign } from "../utils/campaign.js";
 import { uploadToCloudinary } from "../services/cloudinary.js";
+import { normalizePhone } from "../utils/phoneUtils.js";
 import { fileURLToPath } from "url";
 
 const router = Router();
@@ -166,7 +167,7 @@ router.post("/", requireAuth, async (req, res) => {
         requires_follow_up = false,
       } = params;
 
-      to = to.replace(/\D/g, "");
+      to = normalizePhone(to);
 
       if (!template_language) {
         const templateRecord = await Template.findOne({
@@ -176,13 +177,10 @@ router.post("/", requireAuth, async (req, res) => {
         template_language = templateRecord?.language || "en_US";
       }
       // Ensure contact & conversation exist FIRST
-      let contact = await Contact.findOne({ user_id: userId, phone_number: to });
-      if (!contact && to.length >= 10) {
-        // Try to find a matching contact with a country code prefix
-        contact = await Contact.findOne({ user_id: userId, phone_number: { $regex: new RegExp(to + '$') } });
-      }
+      const normalizedPhone = to;
+      let contact = await Contact.findOne({ user_id: userId, phone_number: normalizedPhone });
       if (!contact) {
-        contact = await Contact.create({ user_id: userId, phone_number: to, name: to });
+        contact = await Contact.create({ user_id: userId, phone_number: normalizedPhone, name: normalizedPhone });
       }
 
       // Deep clone components to replace variables per-contact
@@ -253,7 +251,7 @@ router.post("/", requireAuth, async (req, res) => {
         { user_id: userId, contact_id: contact._id },
         {
           $set: {
-            phone_number: to,
+            phone_number: normalizedPhone,
             last_message: `[Template: ${template_name}]`,
             last_message_at: new Date(),
           },
@@ -312,7 +310,7 @@ router.post("/", requireAuth, async (req, res) => {
 
     if (action === "send_message") {
       let { to, content } = params;
-      to = to.replace(/\D/g, "");
+      to = normalizePhone(to);
 
       const endpoint = `${META_API}/${phone_number_id}/messages`;
       const requestBody = {
@@ -360,9 +358,10 @@ router.post("/", requireAuth, async (req, res) => {
       const msgId = data.messages?.[0]?.id;
       // Find or create conversation
       // Ensure contact exists for the conversation to group correctly
+      const normalizedPhoneInbound = normalizePhone(to);
       const contact = await Contact.findOneAndUpdate(
-        { user_id: userId, phone_number: to },
-        { $setOnInsert: { user_id: userId, phone_number: to, name: to } },
+        { user_id: userId, phone_number: normalizedPhoneInbound },
+        { $setOnInsert: { user_id: userId, phone_number: normalizedPhoneInbound, name: normalizedPhoneInbound } },
         { upsert: true, new: true },
       );
 
@@ -370,7 +369,7 @@ router.post("/", requireAuth, async (req, res) => {
         { user_id: userId, contact_id: contact._id },
         {
           $set: {
-            phone_number: to,
+            phone_number: normalizedPhoneInbound,
             last_message: content,
             last_message_at: new Date(),
           },

@@ -2,9 +2,10 @@ import WhatsAppAccount from "../models/WhatsAppAccount.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
 import Template from "../models/Template.js";
-import { AutoReply } from "../models/Automation.js";
+import { AutoReply, Workflow } from "../models/Automation.js";
 import Conversation from "../models/Conversation.js";
 import Campaign from "../models/Campaign.js";
+import { normalizePhone } from "../utils/phoneUtils.js";
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
 const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
@@ -213,13 +214,14 @@ export class WebhookService {
       return;
     }
     const userId = waAccount.user_id;
+    const normalizedPhone = normalizePhone(from);
 
     const contact = await Contact.findOneAndUpdate(
-      { user_id: userId, phone_number: from },
+      { user_id: userId, phone_number: normalizedPhone },
       {
         $setOnInsert: {
           user_id: userId,
-          phone_number: from,
+          phone_number: normalizedPhone,
           name: contactName,
         },
       },
@@ -230,7 +232,7 @@ export class WebhookService {
       { user_id: userId, contact_id: contact._id },
       {
         $set: {
-          phone_number: from,
+          phone_number: normalizedPhone,
           last_message: content,
           last_message_at: new Date(),
           status: "open",
@@ -248,7 +250,7 @@ export class WebhookService {
         direction: "inbound",
         message_type: messageType,
         content,
-        phone_number: from,
+        phone_number: normalizedPhone,
         whatsapp_message_id: msg.id,
         status: "delivered",
         interactive_reply_id: interactiveReplyId,
@@ -265,7 +267,7 @@ export class WebhookService {
           repliedCampaignId = originalMsg.campaign_id;
       } else {
         const lastOutbound = await Message.findOne({
-          phone_number: from,
+          phone_number: normalizedPhone,
           direction: "outbound",
         }).sort({ createdAt: -1 });
         if (lastOutbound?.campaign_id) {
@@ -293,7 +295,18 @@ export class WebhookService {
       if (e.code !== 11000) throw e;
     }
 
-    if (content && messageType === "text") {
+    const workflowHandled = await this.checkWorkflow(
+      userId,
+      conversation,
+      content,
+      interactiveReplyId,
+      waAccount.phone_number_id,
+      waAccount.access_token,
+      conversation._id,
+      contact._id,
+    );
+
+    if (!workflowHandled && content && messageType === "text") {
       await this.checkAutoReply(
         userId,
         from,
@@ -392,6 +405,182 @@ export class WebhookService {
       whatsapp_message_id: data.messages?.[0]?.id,
       status: "sent",
     }).catch(() => {});
+  }
+
+  static async checkWorkflow(
+    userId,
+    conversation,
+    text,
+    interactiveReplyId,
+    phoneNumberId,
+    accessToken,
+    convId,
+    contactId,
+  ) {
+    const workflows = await Workflow.find({ user_id: userId, is_active: true }).sort({ createdAt: 1 });
+    if (!workflows.length) return false;
+
+    const normalizedText = String(text || "").trim().toLowerCase();
+    let workflow = null;
+    let action = null;
+
+    if (conversation.workflow_id && conversation.workflow_step_id) {
+      workflow = await Workflow.findById(conversation.workflow_id);
+      if (!workflow) {
+        conversation.workflow_id = null;
+        conversation.workflow_step_id = null;
+        await conversation.save();
+      }
+    }
+
+    if (workflow) {
+      action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
+    } else {
+      for (const wf of workflows) {
+        if (wf.trigger_type === "message_received") {
+          action = wf.actions?.[0];
+        } else if (wf.trigger_type === "keyword_match" && wf.trigger_value) {
+          const trigger = String(wf.trigger_value).trim().toLowerCase();
+          if (normalizedText === trigger || normalizedText.includes(trigger)) {
+            action = wf.actions?.[0];
+          }
+        }
+
+        if (action) {
+          workflow = wf;
+          break;
+        }
+      }
+    }
+
+    if (!workflow || !action) return false;
+
+    const sent = await this.executeWorkflowAction(
+      workflow,
+      action,
+      phoneNumberId,
+      accessToken,
+      conversation,
+      convId,
+      contactId,
+    );
+
+    return sent;
+  }
+
+  static findNextWorkflowAction(workflow, currentStepId, normalizedText, interactiveReplyId) {
+    const currentStep = workflow.actions?.find((a) => a.id === currentStepId);
+    if (!currentStep) return null;
+
+    if (currentStep.type === "send_buttons" && Array.isArray(currentStep.buttons)) {
+      const match = currentStep.buttons.find((button) => {
+        if (interactiveReplyId && button.id === interactiveReplyId) return true;
+        const title = String(button.title || "").trim().toLowerCase();
+        return title && title === normalizedText;
+      });
+      if (match && match.next_step) {
+        return workflow.actions?.find((a) => a.id === match.next_step);
+      }
+    }
+
+    if (currentStep.next_step) {
+      return workflow.actions?.find((a) => a.id === currentStep.next_step);
+    }
+
+    return null;
+  }
+
+  static async executeWorkflowAction(
+    workflow,
+    action,
+    phoneNumberId,
+    accessToken,
+    conversation,
+    convId,
+    contactId,
+  ) {
+    if (!action) return false;
+
+    const to = conversation.phone_number.replace(/^\+/, "");
+    let requestBody = null;
+    let messageType = "text";
+    let content = action.text || "";
+
+    if (action.type === "send_buttons") {
+      messageType = "interactive";
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: content || "Please choose an option." },
+          action: {
+            buttons: (action.buttons || []).slice(0, 3).map((button) => ({
+              type: "reply",
+              reply: {
+                id: button.id || button.title,
+                title: button.title,
+              },
+            })),
+          },
+        },
+      };
+    } else {
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: content || "" },
+      };
+    }
+
+    const endpoint = `${META_API}/${phoneNumberId}/messages`;
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    });
+    const data = await r.json();
+
+    if (!r.ok) {
+      console.error("[Workflow] Failed to send action", {
+        workflow_id: workflow._id,
+        action_id: action.id,
+        error: data.error?.message,
+      });
+      return false;
+    }
+
+    await Message.create({
+      user_id: workflow.user_id,
+      conversation_id: convId,
+      contact_id: contactId,
+      direction: "outbound",
+      message_type: messageType,
+      content: action.type === "send_buttons" ? `[Workflow Button] ${content}` : content,
+      whatsapp_message_id: data.messages?.[0]?.id,
+      status: "sent",
+    }).catch(() => {});
+
+    const nextStepExists = Boolean(
+      (action.type === "send_buttons" && action.buttons?.some((button) => button.next_step)) ||
+      action.next_step,
+    );
+
+    if (nextStepExists) {
+      conversation.workflow_id = workflow._id;
+      conversation.workflow_step_id = action.id;
+    } else {
+      conversation.workflow_id = null;
+      conversation.workflow_step_id = null;
+    }
+
+    await conversation.save();
+    return true;
   }
 
   static async sendFollowUpMessage(msg, phoneNumberId, wabaId) {
