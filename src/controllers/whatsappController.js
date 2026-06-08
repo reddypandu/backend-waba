@@ -117,14 +117,17 @@ export class WhatsAppController {
           },
           $setOnInsert: { user_id: userId },
         },
-        { upsert: true, new: true },
+        { upsert: true, returnDocument: "after" },
       );
 
       const existing = await WhatsAppAccount.findOne({ user_id: userId });
       const samePhone = existing?.phone_number_id === resolvedPhoneNumberId;
 
-      // Use actual display_phone_number from Meta, don't fallback to ID
-      const displayPhoneNumber = phoneData?.display_phone_number || "";
+      // Use actual display_phone_number from Meta, or preserve the stored
+      // display number on reconnect. Never fallback to the phone_number_id.
+      const displayPhoneNumber =
+        phoneData?.display_phone_number ||
+        (samePhone ? existing?.phone_number || "" : "");
 
       const waAccount = await WhatsAppAccount.findOneAndUpdate(
         { user_id: userId },
@@ -152,7 +155,7 @@ export class WhatsAppController {
             user_id: userId,
           },
         },
-        { upsert: true, new: true },
+        { upsert: true, returnDocument: "after" },
       );
 
       console.log("[OAuth Connect] WhatsApp account saved", {

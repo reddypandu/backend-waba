@@ -67,6 +67,36 @@ const classifyPhoneStatus = (
   return "pending";
 };
 
+const hasDisplayPhoneNumber = (phoneData) =>
+  typeof phoneData?.display_phone_number === "string" &&
+  phoneData.display_phone_number.trim().length > 0;
+
+const mergePhoneDataFromWaba = async (phoneData, waAccount) => {
+  if (hasDisplayPhoneNumber(phoneData) || !waAccount?.waba_id) {
+    return phoneData;
+  }
+
+  const phoneNumbers = await MetaApiService.getWabaPhoneNumbers(
+    waAccount.waba_id,
+    waAccount.access_token,
+  );
+  const matchingPhone = phoneNumbers.find(
+    (number) => number.id === waAccount.phone_number_id,
+  );
+
+  if (!matchingPhone) return phoneData;
+
+  console.log("[Meta Status Sync] Resolved display number from WABA", {
+    phone_number_id: waAccount.phone_number_id,
+    display_phone_number: matchingPhone.display_phone_number || null,
+  });
+
+  return {
+    ...phoneData,
+    ...matchingPhone,
+  };
+};
+
 export async function isMetaTestNumber(
   phoneNumberId,
   accessToken,
@@ -138,10 +168,11 @@ export async function syncAccountStatusFromMeta(waAccount) {
 
   try {
     const isMessaging = await hasMessagingActivity(user_id);
-    const phoneData = await MetaApiService.getPhoneNumber(
+    const rawPhoneData = await MetaApiService.getPhoneNumber(
       phone_number_id,
       access_token,
     );
+    const phoneData = await mergePhoneDataFromWaba(rawPhoneData, waAccount);
     const isTest = await isMetaTestNumber(
       phone_number_id,
       access_token,
@@ -289,7 +320,7 @@ export async function updateAccountWithMetaStatus(waAccount, syncResult) {
     const updated = await WhatsAppAccount.findByIdAndUpdate(
       waAccount._id,
       { $set: updateData },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     console.log("[Meta Status] Account updated", {
@@ -438,7 +469,7 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
         $inc: { registration_attempt_count: 1 },
         $currentDate: { last_registration_attempt: true },
       },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     return {
@@ -469,7 +500,7 @@ export async function attemptRegistrationIfNeeded(waAccount, options = {}) {
       $inc: { registration_attempt_count: 1 },
       $currentDate: { last_registration_attempt: true },
     },
-    { new: true },
+    { returnDocument: "after" },
   );
 
   return {
