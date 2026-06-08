@@ -10,6 +10,7 @@ const MessageSchema = new mongoose.Schema({
   content: { type: String },
   media_url: { type: String },
   template_name: { type: String },
+  template_snapshot: { type: mongoose.Schema.Types.Mixed },
   interactive_reply_id: { type: String }, // Used to store button or list reply ID
   phone_number: { type: String },
   whatsapp_message_id: { type: String, unique: true, sparse: true },
