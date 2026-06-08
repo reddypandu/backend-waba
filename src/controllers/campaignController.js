@@ -239,7 +239,12 @@ export class CampaignController {
       const stats = await Message.aggregate([
         {
           $match: {
-            campaign_id: { $in: campaignIds },
+            $expr: { // Use $expr for robust type-agnostic matching in aggregation
+              $or: [
+                { $in: ["$campaign_id", campaignIds] }, // Match if campaign_id (as is) is in the array
+                { $in: [{ $toString: "$campaign_id" }, campaignIds] }, // Match if campaign_id (as string) is in the array
+              ],
+            },
             user_id: { $in: userIds },
           },
         },
@@ -404,13 +409,41 @@ export class CampaignController {
       const campaignIds = legacyIdValues(campaignId);
       const userIds = legacyIdValues(req.user.id);
 
-      const messages = await Message.find({
-        campaign_id: { $in: campaignIds },
-        user_id: { $in: userIds },
-      })
-        .populate("contact_id", "name phone_number email")
-        .select("phone_number status error_details updatedAt contact_id message_type template_name")
-        .sort({ updatedAt: -1 });
+      // Use aggregation for robust type-agnostic matching, similar to getCampaignStats
+      const messages = await Message.aggregate([
+        {
+          $match: {
+            $expr: {
+              $or: [
+                { $in: ["$campaign_id", campaignIds] }, // Match if campaign_id (as is) is in the array
+                { $in: [{ $toString: "$campaign_id" }, campaignIds] }, // Match if campaign_id (as string) is in the array
+              ],
+            },
+            user_id: { $in: userIds },
+          },
+        },
+        {
+          $lookup: {
+            from: "contacts", // The collection name for Contact model
+            localField: "contact_id",
+            foreignField: "_id",
+            as: "contact_id", // This will be an array, so we need to unwind it
+          },
+        },
+        { $unwind: { path: "$contact_id", preserveNullAndEmptyArrays: true } }, // Handle cases where contact_id might not be found
+        {
+          $project: {
+            phone_number: 1,
+            status: 1,
+            error_details: 1,
+            updatedAt: 1,
+            contact_id: { _id: "$contact_id._id", name: "$contact_id.name", phone_number: "$contact_id.phone_number", email: "$contact_id.email" },
+            message_type: 1,
+            template_name: 1,
+          },
+        },
+        { $sort: { updatedAt: -1 } },
+      ]);
 
       res.json({ 
         success: true, 
