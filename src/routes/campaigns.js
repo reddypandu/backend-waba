@@ -11,6 +11,7 @@ router.delete('/:id', requireAuth, CampaignController.deleteCampaign);
 router.post('/:id/send', requireAuth, CampaignController.sendCampaign);
 router.post('/:id/status', requireAuth, CampaignController.updateCampaignStatus);
 router.get('/:id/stats', requireAuth, CampaignController.getCampaignStats);
+router.get('/:id/reports', requireAuth, CampaignController.getCampaignReports);
 router.post('/:id/retarget', requireAuth, CampaignController.retargetFailed);
 
 export default router;

@@ -195,7 +195,7 @@ router.post("/", requireAuth, async (req, res) => {
 
     const { access_token, phone_number_id, waba_id } = waAccount;
     const user = await User.findById(userId);
-    const isFree = (user?.subscription?.plan || 'free') === 'free';
+    const isFree = (user?.subscription?.plan || 'paid') === 'free'; // Existing users without a plan are 'paid'
 
     if (action === "create_template") {
       if (isFree) {
@@ -537,7 +537,7 @@ router.post("/", requireAuth, async (req, res) => {
 router.get("/conversations", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
       return res.status(403).json({ 
         error: "Shared Inbox is a premium feature. Please upgrade to view and reply to messages." 
       });

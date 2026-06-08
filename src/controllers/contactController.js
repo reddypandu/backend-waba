@@ -19,7 +19,7 @@ export class ContactController {
   static async createContact(req, res) {
     try {
       const user = await User.findById(req.user.id);
-      if ((user?.subscription?.plan || 'free') === 'free') {
+      if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
         const count = await Contact.countDocuments({ user_id: req.user.id });
         if (count >= 10) {
           return res.status(403).json({ 
@@ -29,6 +29,15 @@ export class ContactController {
       }
 
       const { name, phone_number, email, tags, opt_in_status, custom_attributes } = req.body;
+
+      // Enforce limits for custom fields and tags
+      if (tags && Array.isArray(tags) && tags.length > 15) {
+        return res.status(400).json({ error: "Maximum 15 tags allowed per contact." });
+      }
+      if (custom_attributes && Object.keys(custom_attributes).length > 15) {
+        return res.status(400).json({ error: "Maximum Auto Replies allowed per contact." });
+      }
+
       if (!phone_number) return res.status(400).json({ error: 'Phone number is required' });
 
       // Normalize phone number (handle country codes, convert 10-digit to 91+10-digit)
@@ -58,7 +67,7 @@ export class ContactController {
     if (!req.file) return res.status(400).json({ error: 'CSV file required' });
     
     const user = await User.findById(req.user.id);
-    const isFree = (user?.subscription?.plan || 'free') === 'free';
+    const isFree = (user?.subscription?.plan || 'paid') === 'free'; // Existing users without a plan are 'paid'
     let currentCount = isFree ? await Contact.countDocuments({ user_id: req.user.id }) : 0;
 
     const results = [];
@@ -104,6 +113,7 @@ export class ContactController {
         let tags = [];
         if (tagsIdx !== -1 && columns[tagsIdx]) {
             tags = columns[tagsIdx].split(';').map(t => t.trim()).filter(Boolean); // assume semicolons for array
+            if (tags.length > 15) tags = tags.slice(0, 15); // Enforce 15 tags limit during import
         }
 
         try {
@@ -133,6 +143,14 @@ export class ContactController {
     try {
       const { id } = req.params;
       const updateData = req.body;
+
+      if (updateData.tags && Array.isArray(updateData.tags) && updateData.tags.length > 15) {
+        return res.status(400).json({ error: "Maximum 15 tags allowed." });
+      }
+      if (updateData.custom_attributes && Object.keys(updateData.custom_attributes).length > 15) {
+        return res.status(400).json({ error: "Maximum Auto Replies allowed." });
+      }
+
       const contact = await Contact.findOneAndUpdate(
         { _id: id, user_id: req.user.id },
         { $set: updateData },

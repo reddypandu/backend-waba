@@ -246,7 +246,7 @@ router.get("/me", requireAuth, async (req, res) => {
     });
 
     const subscription = {
-      plan: user.subscription?.plan || 'free',
+      plan: user.subscription?.plan || 'paid', // Default existing users to 'paid' if plan is not set
       status: user.subscription?.status || 'active',
       messages_used: messagesUsed,
       start_date: user.subscription?.start_date || new Date(),
@@ -300,8 +300,8 @@ router.get("/users", requireAuth, async (req, res) => {
         if (userObject.role === "admin") {
           userObject.subscription = undefined;
         } else if (!userObject.subscription?.plan) {
-          userObject.subscription = {
-            plan: "free",
+          userObject.subscription = { // Default existing users to 'paid' if plan is not set
+            plan: "paid",
             status: "active",
             messages_used: 0,
             start_date: userObject.subscription?.start_date || new Date(),
@@ -318,11 +318,8 @@ router.get("/users", requireAuth, async (req, res) => {
     const activeUsers = users.filter((u) => u.role !== "admin");
     const stats = {
       total_users: users.length,
-      total_free: activeUsers.filter((u) => (u.subscription?.plan || "free") === "free").length,
-      total_starter: activeUsers.filter((u) => (u.subscription?.plan || "free") === "starter").length,
-      total_growth: activeUsers.filter((u) => (u.subscription?.plan || "free") === "growth").length,
-      total_pro: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "free")).length,
-      total_professional: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "free")).length,
+      total_free: activeUsers.filter((u) => (u.subscription?.plan || "paid") === "free").length, // Count 'free' explicitly
+      total_paid: activeUsers.filter((u) => (u.subscription?.plan || "paid") === "paid").length, // Count 'paid' explicitly
     };
 
     res.json({ users: usersWithWA, stats });
@@ -620,7 +617,7 @@ router.get("/contacts", requireAuth, async (req, res) => {
 router.post("/contacts", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') {
       const count = await Contact.countDocuments({ user_id: req.user.id });
       if (count >= 10) {
         return res.status(403).json({ 
@@ -682,7 +679,7 @@ router.get("/templates", requireAuth, async (req, res) => {
 router.post("/templates", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') {
       return res.status(403).json({ 
         error: "Template creation is a premium feature. Please upgrade your plan to create custom templates." 
       });
@@ -736,7 +733,7 @@ router.get("/auto-replies", requireAuth, async (req, res) => {
 router.post("/auto-replies", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') {
       return res.status(403).json({ 
         error: "Auto-replies are available on paid plans. Please upgrade to enable automation." 
       });
@@ -797,7 +794,7 @@ router.get("/workflows", requireAuth, async (req, res) => {
 router.post("/workflows", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') {
       return res.status(403).json({ 
         error: "Workflows are premium features. Please upgrade to automate your business processes." 
       });

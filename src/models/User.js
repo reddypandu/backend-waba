@@ -8,7 +8,7 @@ const UserSchema = new mongoose.Schema({
   avatar_url: { type: String },
   phone: { type: String },
   subscription: {
-    plan: { type: String, enum: ['free', 'starter', 'growth', 'professional', 'pro'], default: 'starter' },
+    plan: { type: String, enum: ['free', 'paid'], default: 'free' },
     status: { type: String, default: 'active' },
     messages_used: { type: Number, default: 0 },
     start_date: { type: Date, default: Date.now },

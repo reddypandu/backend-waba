@@ -29,7 +29,7 @@ router.options("*", cors());
 router.post("/keys/generate", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
       return res.status(403).json({ 
         error: "API Keys are available on paid plans. Please upgrade to use this feature." 
       });
@@ -54,7 +54,7 @@ router.post("/keys/generate", requireAuth, async (req, res) => {
 router.post("/keys/regenerate", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if ((user?.subscription?.plan || 'free') === 'free') {
+    if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
       return res.status(403).json({ 
         error: "API Keys are available on paid plans. Please upgrade." 
       });

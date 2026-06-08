@@ -126,7 +126,7 @@ export class CampaignController {
   static async createCampaign(req, res) {
     try {
       const user = await User.findById(req.user.id);
-      if ((user?.subscription?.plan || 'free') === 'free') {
+      if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
         return res.status(403).json({ 
           error: "Campaign creation is a premium feature. Please upgrade to launch broadcasts." 
         });
@@ -393,6 +393,30 @@ export class CampaignController {
         } catch (_) {}
       }
       res.json({ success: true, sent });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async getCampaignReports(req, res) {
+    try {
+      const campaignId = req.params.id;
+      const campaignIds = legacyIdValues(campaignId);
+      const userIds = legacyIdValues(req.user.id);
+
+      const messages = await Message.find({
+        campaign_id: { $in: campaignIds },
+        user_id: { $in: userIds },
+      })
+        .populate("contact_id", "name phone_number email")
+        .select("phone_number status error_details updatedAt contact_id message_type template_name")
+        .sort({ updatedAt: -1 });
+
+      res.json({ 
+        success: true, 
+        count: messages.length,
+        messages 
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
