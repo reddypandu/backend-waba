@@ -246,7 +246,7 @@ router.get("/me", requireAuth, async (req, res) => {
     });
 
     const subscription = {
-      plan: user.subscription?.plan || 'starter',
+      plan: user.subscription?.plan || 'free',
       status: user.subscription?.status || 'active',
       messages_used: messagesUsed,
       start_date: user.subscription?.start_date || new Date(),
@@ -619,6 +619,15 @@ router.get("/contacts", requireAuth, async (req, res) => {
 
 router.post("/contacts", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      const count = await Contact.countDocuments({ user_id: req.user.id });
+      if (count >= 10) {
+        return res.status(403).json({ 
+          error: "Free plan limit reached. You can only have 10 contacts. Please upgrade to add more." 
+        });
+      }
+    }
     const { name, phone_number, email, tags, notes } = req.body;
     const contact = await Contact.findOneAndUpdate(
       { user_id: req.user.id, phone_number },
@@ -672,6 +681,12 @@ router.get("/templates", requireAuth, async (req, res) => {
 
 router.post("/templates", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "Template creation is a premium feature. Please upgrade your plan to create custom templates." 
+      });
+    }
     const template = await Template.create({
       ...req.body,
       user_id: req.user.id,
@@ -720,6 +735,12 @@ router.get("/auto-replies", requireAuth, async (req, res) => {
 
 router.post("/auto-replies", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "Auto-replies are available on paid plans. Please upgrade to enable automation." 
+      });
+    }
     const { keyword, match_type = "contains", response } = req.body;
     if (!keyword || !response)
       return res.status(400).json({ error: "keyword and response required" });
@@ -775,6 +796,12 @@ router.get("/workflows", requireAuth, async (req, res) => {
 
 router.post("/workflows", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "Workflows are premium features. Please upgrade to automate your business processes." 
+      });
+    }
     const wf = await Workflow.create({
       ...req.body,
       user_id: req.user.id,

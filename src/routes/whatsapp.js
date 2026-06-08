@@ -194,8 +194,15 @@ router.post("/", requireAuth, async (req, res) => {
         .json({ error: "WhatsApp not configured. Complete setup first." });
 
     const { access_token, phone_number_id, waba_id } = waAccount;
+    const user = await User.findById(userId);
+    const isFree = (user?.subscription?.plan || 'free') === 'free';
 
     if (action === "create_template") {
+      if (isFree) {
+        return res.status(403).json({ 
+          error: "Creating templates is not allowed on the free plan. Please upgrade." 
+        });
+      }
       const { name, category, language, components, local_url } = params;
       const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
         method: "POST",
@@ -225,6 +232,11 @@ router.post("/", requireAuth, async (req, res) => {
     }
 
     if (action === "send_template") {
+      if (isFree) {
+        return res.status(403).json({ 
+          error: "Sending template messages is a premium feature. Please upgrade your plan." 
+        });
+      }
       let {
         to,
         template_name,
@@ -519,6 +531,12 @@ router.post("/", requireAuth, async (req, res) => {
 // ── Inbox (Conversations & Messages) ──────────────────────────────────────────
 router.get("/conversations", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "Shared Inbox is a premium feature. Please upgrade to view and reply to messages." 
+      });
+    }
     const convs = await Conversation.find({ user_id: req.user.id })
       .populate("contact_id")
       .sort({ last_message_at: -1 });
@@ -771,100 +789,4 @@ router.post("/campaigns/:id/retarget", requireAuth, async (req, res) => {
       _id: req.params.id,
       user_id: req.user.id,
     });
-    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
-
-    // Find messages that failed for this campaign
-    const failedMessages = await Message.find({
-      campaign_id: campaign._id,
-      status: "failed",
-    });
-    if (failedMessages.length === 0)
-      return res.json({
-        success: true,
-        sent: 0,
-        message: "No failed messages to retarget",
-      });
-
-    const waAccount = await WhatsAppAccount.findOne({ user_id: req.user.id });
-
-    const templateRecord = await Template.findOne({
-      user_id: req.user.id,
-      name: campaign.template_name,
-    });
-    const templateLanguage = templateRecord?.language || "en_US";
-
-    let sent = 0;
-    for (const msg of failedMessages) {
-      try {
-        const components = campaign.components || [];
-        const r = await fetch(
-          `${META_API}/${waAccount.phone_number_id}/messages`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${waAccount.access_token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              messaging_product: "whatsapp",
-              to: msg.phone_number,
-              type: "template",
-              template: {
-                name: campaign.template_name,
-                language: { code: templateLanguage },
-                ...(components.length > 0 && { components }),
-              },
-            }),
-          },
-        );
-        const data = await r.json();
-        if (r.ok) {
-          sent++;
-          await Message.findByIdAndUpdate(msg._id, {
-            status: "sent",
-            whatsapp_message_id: data.messages?.[0]?.id,
-            error_details: null,
-          });
-        }
-      } catch (_) {}
-    }
-    res.json({ success: true, sent });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get("/messages-by-campaign/:id", requireAuth, async (req, res) => {
-  try {
-    const messages = await Message.find({
-      user_id: new mongoose.Types.ObjectId(req.user.id),
-      campaign_id: new mongoose.Types.ObjectId(req.params.id),
-    }).sort({ createdAt: -1 });
-    res.json({ messages });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post("/contacts/batch", requireAuth, async (req, res) => {
-  try {
-    const { contacts } = req.body;
-    if (!Array.isArray(contacts))
-      return res.status(400).json({ error: "Contacts array required" });
-
-    const createdIds = [];
-    for (const c of contacts) {
-      const contact = await Contact.findOneAndUpdate(
-        { user_id: req.user.id, phone_number: c.phone },
-        { $set: { name: c.name || c.phone } },
-        { upsert: true, new: true },
-      );
-      createdIds.push(contact._id);
-    }
-    res.json({ success: true, ids: createdIds });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-export default router;
+ 

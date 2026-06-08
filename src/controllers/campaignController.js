@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Campaign from "../models/Campaign.js";
+import User from "../models/User.js";
 import Message from "../models/Message.js";
 import Contact from "../models/Contact.js";
 import WhatsAppAccount from "../models/WhatsAppAccount.js";
@@ -124,6 +125,13 @@ export class CampaignController {
 
   static async createCampaign(req, res) {
     try {
+      const user = await User.findById(req.user.id);
+      if ((user?.subscription?.plan || 'free') === 'free') {
+        return res.status(403).json({ 
+          error: "Campaign creation is a premium feature. Please upgrade to launch broadcasts." 
+        });
+      }
+
       const {
         name,
         template_name,

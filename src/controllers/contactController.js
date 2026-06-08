@@ -1,6 +1,7 @@
 import fs from 'fs';
 import csv from 'csv-parser';
 import Contact from '../models/Contact.js';
+import User from '../models/User.js';
 import { normalizePhone } from '../utils/phoneUtils.js';
 
 export class ContactController {
@@ -17,6 +18,16 @@ export class ContactController {
 
   static async createContact(req, res) {
     try {
+      const user = await User.findById(req.user.id);
+      if ((user?.subscription?.plan || 'free') === 'free') {
+        const count = await Contact.countDocuments({ user_id: req.user.id });
+        if (count >= 10) {
+          return res.status(403).json({ 
+            error: "Free plan limit reached (10 contacts). Please upgrade to add more." 
+          });
+        }
+      }
+
       const { name, phone_number, email, tags, opt_in_status, custom_attributes } = req.body;
       if (!phone_number) return res.status(400).json({ error: 'Phone number is required' });
 
@@ -46,6 +57,10 @@ export class ContactController {
   static async importCsv(req, res) {
     if (!req.file) return res.status(400).json({ error: 'CSV file required' });
     
+    const user = await User.findById(req.user.id);
+    const isFree = (user?.subscription?.plan || 'free') === 'free';
+    let currentCount = isFree ? await Contact.countDocuments({ user_id: req.user.id }) : 0;
+
     const results = [];
     let successCount = 0;
     let failCount = 0;
@@ -76,6 +91,12 @@ export class ContactController {
             failCount++;
             continue;
         }
+
+        if (isFree && currentCount >= 10) {
+            console.log("Import stopped: Free plan limit reached");
+            failCount++;
+            continue;
+        }
         phone = normalizePhone(phone); // normalize phone number with country code handling
 
         const name = nameIdx !== -1 ? columns[nameIdx]?.trim() : '';
@@ -98,6 +119,7 @@ export class ContactController {
                 { upsert: true }
             );
             successCount++;
+            currentCount++;
         } catch(err) {
             console.error('Import row error:', err);
             failCount++;
