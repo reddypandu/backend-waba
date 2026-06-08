@@ -402,6 +402,11 @@ router.post("/", requireAuth, async (req, res) => {
 
     if (action === "send_message") {
       let { to, content } = params;
+      if (isFree) {
+        return res.status(403).json({ 
+          error: "Direct messaging is a premium feature. Please upgrade your plan." 
+        });
+      }
       to = normalizePhone(to);
 
       const endpoint = `${META_API}/${phone_number_id}/messages`;
@@ -783,10 +788,4 @@ router.get("/campaigns/:id/stats", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/campaigns/:id/retarget", requireAuth, async (req, res) => {
-  try {
-    const campaign = await Campaign.findOne({
-      _id: req.params.id,
-      user_id: req.user.id,
-    });
- 
+export default router;

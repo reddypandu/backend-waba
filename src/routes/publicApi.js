@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js";
 import ApiKey from "../models/ApiKey.js";
 import Template from "../models/Template.js";
 import Contact from "../models/Contact.js";
+import User from "../models/User.js";
 import Conversation from "../models/Conversation.js";
 import Message from "../models/Message.js";
 import { normalizePhone } from "../utils/phoneUtils.js";
@@ -27,6 +28,12 @@ router.options("*", cors());
 // Generate or get existing API key
 router.post("/keys/generate", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "API Keys are available on paid plans. Please upgrade to use this feature." 
+      });
+    }
     let apiKey = await ApiKey.findOne({ user_id: req.user.id });
     if (apiKey) {
       return res.json({
@@ -46,6 +53,12 @@ router.post("/keys/generate", requireAuth, async (req, res) => {
 // Regenerate key (invalidates old one)
 router.post("/keys/regenerate", requireAuth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if ((user?.subscription?.plan || 'free') === 'free') {
+      return res.status(403).json({ 
+        error: "API Keys are available on paid plans. Please upgrade." 
+      });
+    }
     const crypto = await import("crypto");
     const newKey = "yt_" + crypto.randomBytes(32).toString("hex");
     const apiKey = await ApiKey.findOneAndUpdate(

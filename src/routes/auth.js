@@ -25,7 +25,7 @@ router.post('/send-otp', async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const sent = await sendOtpEmail(email, otp);
+    const sent = await sendOtpEmail(email, otp, 'signup');
     if (!sent) return res.status(500).json({ error: 'Failed to send OTP email. Please check SMTP settings.' });
 
     res.json({ success: true, message: 'OTP sent successfully' });
@@ -69,7 +69,7 @@ router.post('/send-reset-otp', async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const sent = await sendOtpEmail(email, otp);
+    const sent = await sendOtpEmail(email, otp, 'reset');
     if (!sent) return res.status(500).json({ error: 'Failed to send OTP email. Please check SMTP settings.' });
 
     res.json({ success: true, message: 'OTP sent successfully' });
@@ -113,7 +113,7 @@ router.post('/signup', async (req, res) => {
       password: hashedPassword,
       full_name: full_name || '',
       role: 'user',
-      subscription: { plan: 'starter', status: 'active', messages_used: 0, start_date: new Date() },
+      subscription: { plan: 'free', status: 'active', messages_used: 0, start_date: new Date() },
       wallet: { balance: 0 },
     });
 

@@ -301,7 +301,7 @@ router.get("/users", requireAuth, async (req, res) => {
           userObject.subscription = undefined;
         } else if (!userObject.subscription?.plan) {
           userObject.subscription = {
-            plan: "starter",
+            plan: "free",
             status: "active",
             messages_used: 0,
             start_date: userObject.subscription?.start_date || new Date(),
@@ -318,11 +318,11 @@ router.get("/users", requireAuth, async (req, res) => {
     const activeUsers = users.filter((u) => u.role !== "admin");
     const stats = {
       total_users: users.length,
-      total_free: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "free").length,
-      total_starter: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "starter").length,
-      total_growth: activeUsers.filter((u) => (u.subscription?.plan || "starter") === "growth").length,
-      total_pro: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "starter")).length,
-      total_professional: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "starter")).length,
+      total_free: activeUsers.filter((u) => (u.subscription?.plan || "free") === "free").length,
+      total_starter: activeUsers.filter((u) => (u.subscription?.plan || "free") === "starter").length,
+      total_growth: activeUsers.filter((u) => (u.subscription?.plan || "free") === "growth").length,
+      total_pro: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "free")).length,
+      total_professional: activeUsers.filter((u) => ["pro", "professional"].includes(u.subscription?.plan || "free")).length,
     };
 
     res.json({ users: usersWithWA, stats });
