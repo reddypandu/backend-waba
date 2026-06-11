@@ -6,6 +6,64 @@ import Conversation from "../models/Conversation.js";
 import Template from "../models/Template.js";
 import { normalizePhone } from "./phoneUtils.js";
 
+const findTemplateComponent = (components = [], type) =>
+  components.find((component) => component.type?.toUpperCase() === type);
+
+const replaceTemplateParams = (text = "", parameters = []) =>
+  text.replace(/\{\{(\d+)\}\}/g, (_match, index) => {
+    const value = parameters[Number(index) - 1]?.text;
+    return value === undefined || value === null ? "" : String(value);
+  });
+
+const getMediaFromParameter = (parameter = {}) =>
+  parameter.image?.link ||
+  parameter.video?.link ||
+  parameter.document?.link ||
+  null;
+
+const buildTemplateSnapshot = (templateRecord, sentComponents = []) => {
+  const templateComponents = Array.isArray(templateRecord?.components)
+    ? templateRecord.components
+    : [];
+  const header = findTemplateComponent(templateComponents, "HEADER");
+  const body = findTemplateComponent(templateComponents, "BODY");
+  const footer = findTemplateComponent(templateComponents, "FOOTER");
+  const buttons = findTemplateComponent(templateComponents, "BUTTONS");
+  const sentHeader = findTemplateComponent(sentComponents, "HEADER");
+  const sentBody = findTemplateComponent(sentComponents, "BODY");
+
+  const mediaUrl =
+    getMediaFromParameter(sentHeader?.parameters?.[0]) ||
+    templateRecord?.local_url ||
+    header?.example?.header_url?.[0] ||
+    header?.example?.header_handle?.[0] ||
+    null;
+
+  return {
+    name: templateRecord?.name,
+    language: templateRecord?.language,
+    category: templateRecord?.category,
+    header: header
+      ? {
+          format: header.format,
+          text:
+            header.format === "TEXT"
+              ? replaceTemplateParams(header.text || "", sentHeader?.parameters)
+              : header.text || "",
+          media_url: ["IMAGE", "VIDEO", "DOCUMENT"].includes(header.format)
+            ? mediaUrl
+            : null,
+        }
+      : null,
+    body: replaceTemplateParams(
+      body?.text || templateRecord?.body_text || "",
+      sentBody?.parameters,
+    ),
+    footer: footer?.text || templateRecord?.footer_text || "",
+    buttons: buttons?.buttons || templateRecord?.buttons || [],
+  };
+};
+
 const META_API = "https://graph.facebook.com/v22.0";
 const STALE_RUNNING_MS = 2 * 60 * 1000;
 
@@ -286,6 +344,13 @@ async function processCampaignInBackground(campaign, waAccount) {
 
           if (r.ok && msgId) {
             sent++;
+            const templateSnapshot = buildTemplateSnapshot(
+              templateRecord,
+              contactComponents,
+            );
+            const messageContent =
+              templateSnapshot.body || `[Template: ${template_name}]`;
+
             await Message.create({
               user_id: campaign.user_id,
               conversation_id: conversation?._id,
@@ -294,8 +359,9 @@ async function processCampaignInBackground(campaign, waAccount) {
               direction: "outbound",
               message_type: "template",
               template_name,
-              content: `[Template: ${template_name}]`,
-              media_url: mediaUrl,
+              content: messageContent,
+              media_url: mediaUrl || templateSnapshot.header?.media_url,
+              template_snapshot: templateSnapshot,
               phone_number: recipient,
               whatsapp_message_id: msgId,
               status: "sent",

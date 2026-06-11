@@ -13,6 +13,64 @@ import cors from "cors";
 const router = Router();
 const META_API = "https://graph.facebook.com/v22.0";
 
+const findTemplateComponent = (components = [], type) =>
+  components.find((component) => component.type?.toUpperCase() === type);
+
+const replaceTemplateParams = (text = "", parameters = []) =>
+  text.replace(/\{\{(\d+)\}\}/g, (_match, index) => {
+    const value = parameters[Number(index) - 1]?.text;
+    return value === undefined || value === null ? "" : String(value);
+  });
+
+const getMediaFromParameter = (parameter = {}) =>
+  parameter.image?.link ||
+  parameter.video?.link ||
+  parameter.document?.link ||
+  null;
+
+const buildTemplateSnapshot = (templateRecord, sentComponents = []) => {
+  const templateComponents = Array.isArray(templateRecord?.components)
+    ? templateRecord.components
+    : [];
+  const header = findTemplateComponent(templateComponents, "HEADER");
+  const body = findTemplateComponent(templateComponents, "BODY");
+  const footer = findTemplateComponent(templateComponents, "FOOTER");
+  const buttons = findTemplateComponent(templateComponents, "BUTTONS");
+  const sentHeader = findTemplateComponent(sentComponents, "HEADER");
+  const sentBody = findTemplateComponent(sentComponents, "BODY");
+
+  const mediaUrl =
+    getMediaFromParameter(sentHeader?.parameters?.[0]) ||
+    templateRecord?.local_url ||
+    header?.example?.header_url?.[0] ||
+    header?.example?.header_handle?.[0] ||
+    null;
+
+  return {
+    name: templateRecord?.name,
+    language: templateRecord?.language,
+    category: templateRecord?.category,
+    header: header
+      ? {
+          format: header.format,
+          text:
+            header.format === "TEXT"
+              ? replaceTemplateParams(header.text || "", sentHeader?.parameters)
+              : header.text || "",
+          media_url: ["IMAGE", "VIDEO", "DOCUMENT"].includes(header.format)
+            ? mediaUrl
+            : null,
+        }
+      : null,
+    body: replaceTemplateParams(
+      body?.text || templateRecord?.body_text || "",
+      sentBody?.parameters,
+    ),
+    footer: footer?.text || templateRecord?.footer_text || "",
+    buttons: buttons?.buttons || templateRecord?.buttons || [],
+  };
+};
+
 // ── Key Management (requires user login) ─────────────────────────────────────
 // Allow all origins for public API
 router.use(
@@ -169,6 +227,36 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
       { upsert: true, new: true },
     );
 
+    // Deep clone components to replace variables per-contact
+    const contactComponents = JSON.parse(JSON.stringify(components || []));
+    contactComponents.forEach(comp => {
+      if (comp.parameters) {
+        comp.parameters.forEach(param => {
+          if (param.type === 'text' && typeof param.text === 'string') {
+            param.text = param.text.replace(/\{\{name(?:\|([^}]*))?\}\}/gi, (match, fallback) => {
+              const cName = contact.name?.trim();
+              const isValidName = cName && cName.toLowerCase() !== "user" && cName !== contact.phone_number;
+              return isValidName ? cName : (fallback || "");
+            });
+          }
+        });
+      }
+    });
+
+    const templateSnapshot = buildTemplateSnapshot(
+      templateRecord,
+      contactComponents,
+    );
+    const messageContent =
+      templateSnapshot.body || `[Template: ${template_name}]`;
+
+    // Extract media URL if present
+    const headerComp = (components || []).find((c) => c.type === "header");
+    const mediaUrl =
+      headerComp?.parameters?.[0]?.image?.link ||
+      headerComp?.parameters?.[0]?.video?.link ||
+      headerComp?.parameters?.[0]?.document?.link;
+
     await Message.create({
       user_id: userId,
       conversation_id: conv._id,
@@ -176,7 +264,9 @@ router.post("/send-template", apiKeyAuth, async (req, res) => {
       direction: "outbound",
       message_type: "template",
       template_name,
-      content: `[Template: ${template_name}]`,
+      content: messageContent,
+      media_url: mediaUrl || templateSnapshot.header?.media_url,
+      template_snapshot: templateSnapshot,
       phone_number: to,
       whatsapp_message_id: msgId,
       status: "sent",
