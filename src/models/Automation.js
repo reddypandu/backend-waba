@@ -17,6 +17,15 @@ const WorkflowSchema = new mongoose.Schema({
   trigger_value: { type: String },
   actions: { type: mongoose.Schema.Types.Mixed, default: [] },
   is_active: { type: Boolean, default: true },
+  analytics: {
+    trigger_count: { type: Number, default: 0 },
+    execution_count: { type: Number, default: 0 },
+    conversion_count: { type: Number, default: 0 },
+    failed_count: { type: Number, default: 0 },
+    last_triggered_at: { type: Date },
+    last_executed_at: { type: Date },
+    last_failed_at: { type: Date },
+  },
 }, { timestamps: true });
 
 export const AutoReply = mongoose.model('AutoReply', AutoReplySchema);

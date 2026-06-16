@@ -423,6 +423,7 @@ export class WebhookService {
     const normalizedText = String(text || "").trim().toLowerCase();
     let workflow = null;
     let action = null;
+    let isContinuation = false;
 
     if (conversation.workflow_id && conversation.workflow_step_id) {
       workflow = await Workflow.findById(conversation.workflow_id);
@@ -435,6 +436,7 @@ export class WebhookService {
 
     if (workflow) {
       action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
+      isContinuation = Boolean(action);
     } else {
       for (const wf of workflows) {
         if (wf.trigger_type === "message_received") {
@@ -454,6 +456,24 @@ export class WebhookService {
     }
 
     if (!workflow || !action) return false;
+
+    if (isContinuation) {
+      await Workflow.updateOne(
+        { _id: workflow._id },
+        {
+          $inc: { "analytics.conversion_count": 1 },
+          $set: { "analytics.last_triggered_at": new Date() },
+        },
+      ).catch(() => {});
+    } else {
+      await Workflow.updateOne(
+        { _id: workflow._id },
+        {
+          $inc: { "analytics.trigger_count": 1 },
+          $set: { "analytics.last_triggered_at": new Date() },
+        },
+      ).catch(() => {});
+    }
 
     const sent = await this.executeWorkflowAction(
       workflow,
@@ -552,8 +572,23 @@ export class WebhookService {
         action_id: action.id,
         error: data.error?.message,
       });
+      await Workflow.updateOne(
+        { _id: workflow._id },
+        {
+          $inc: { "analytics.failed_count": 1 },
+          $set: { "analytics.last_failed_at": new Date() },
+        },
+      ).catch(() => {});
       return false;
     }
+
+    await Workflow.updateOne(
+      { _id: workflow._id },
+      {
+        $inc: { "analytics.execution_count": 1 },
+        $set: { "analytics.last_executed_at": new Date() },
+      },
+    ).catch(() => {});
 
     await Message.create({
       user_id: workflow.user_id,

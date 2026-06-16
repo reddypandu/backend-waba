@@ -60,6 +60,68 @@ export class AutomationController {
     }
   }
 
+  static async getWorkflowAnalytics(req, res) {
+    try {
+      const workflows = await Workflow.find({ user_id: req.user.id })
+        .select('name trigger_type trigger_value is_active actions analytics createdAt updatedAt')
+        .sort({ updatedAt: -1 });
+
+      const totals = workflows.reduce(
+        (acc, workflow) => {
+          const analytics = workflow.analytics || {};
+          acc.trigger_count += analytics.trigger_count || 0;
+          acc.execution_count += analytics.execution_count || 0;
+          acc.conversion_count += analytics.conversion_count || 0;
+          acc.failed_count += analytics.failed_count || 0;
+          if (analytics.last_triggered_at && (!acc.last_activity_at || analytics.last_triggered_at > acc.last_activity_at)) {
+            acc.last_activity_at = analytics.last_triggered_at;
+          }
+          if (analytics.last_executed_at && (!acc.last_activity_at || analytics.last_executed_at > acc.last_activity_at)) {
+            acc.last_activity_at = analytics.last_executed_at;
+          }
+          return acc;
+        },
+        {
+          workflow_count: workflows.length,
+          active_count: workflows.filter((workflow) => workflow.is_active).length,
+          trigger_count: 0,
+          execution_count: 0,
+          conversion_count: 0,
+          failed_count: 0,
+          last_activity_at: null,
+        },
+      );
+
+      const rows = workflows.map((workflow) => {
+        const analytics = workflow.analytics || {};
+        const triggerCount = analytics.trigger_count || 0;
+        const executionCount = analytics.execution_count || 0;
+        const conversionCount = analytics.conversion_count || 0;
+        return {
+          _id: workflow._id,
+          name: workflow.name,
+          trigger_type: workflow.trigger_type,
+          trigger_value: workflow.trigger_value,
+          is_active: workflow.is_active,
+          steps_count: Array.isArray(workflow.actions) ? workflow.actions.length : 0,
+          trigger_count: triggerCount,
+          execution_count: executionCount,
+          conversion_count: conversionCount,
+          failed_count: analytics.failed_count || 0,
+          conversion_rate: triggerCount ? Math.round((conversionCount / triggerCount) * 100) : 0,
+          execution_rate: triggerCount ? Math.round((executionCount / triggerCount) * 100) : 0,
+          last_triggered_at: analytics.last_triggered_at,
+          last_executed_at: analytics.last_executed_at,
+          last_failed_at: analytics.last_failed_at,
+        };
+      });
+
+      res.json({ totals, workflows: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+
   static async createWorkflow(req, res) {
     try {
       const workflow = await Workflow.create({
