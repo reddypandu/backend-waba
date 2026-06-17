@@ -497,19 +497,28 @@ router.post("/", requireAuth, async (req, res) => {
 
     if (action === "edit_template") {
       const { name, category, components } = params;
-      const r = await fetch(`${META_API}/${waba_id}/message_templates`, {
+      
+      const existingTemplate = await Template.findOne({ user_id: userId, name: name });
+      if (!existingTemplate || !existingTemplate.meta_template_id) {
+        return res.status(404).json({ error: "Template not found or missing Meta ID. Cannot edit." });
+      }
+
+      const r = await fetch(`${META_API}/${existingTemplate.meta_template_id}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${access_token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ name, category, components }),
+        body: JSON.stringify({ components, category }),
       });
       const data = await r.json();
-      if (!r.ok)
-        return res
-          .status(400)
-          .json({ error: data.error?.message || "Meta API error" });
+      if (!r.ok) {
+        let errMsg = data.error?.error_user_msg || data.error?.message || "Meta API error";
+        if (data.error?.error_data?.details) {
+          errMsg += ": " + (typeof data.error.error_data.details === 'string' ? data.error.error_data.details : JSON.stringify(data.error.error_data.details));
+        }
+        return res.status(400).json({ error: errMsg });
+      }
 
       await Template.findOneAndUpdate(
         { user_id: userId, name: name },
