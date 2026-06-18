@@ -3,10 +3,170 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import Otp from '../models/Otp.js';
+import WhatsAppAccount from '../models/WhatsAppAccount.js';
+import Contact from '../models/Contact.js';
+import Conversation from '../models/Conversation.js';
+import Message from '../models/Message.js';
+import Template from '../models/Template.js';
 import { sendOtpEmail } from '../utils/mailer.js';
+import { normalizePhone } from '../utils/phoneUtils.js';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v22.0';
+const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
+
+const isValidPhone = (phone) => /^\d{10,15}$/.test(phone);
+
+const getTemplateBodyPlaceholderCount = (templateRecord) => {
+  const body = templateRecord?.components?.find((component) => component.type === 'BODY');
+  const text = body?.text || templateRecord?.body_text || '';
+  const matches = text.match(/\{\{\s*\d+\s*\}\}/g);
+  return matches?.length || 0;
+};
+
+const buildWelcomeTemplateComponents = async (adminUserId, templateName, registeredUser) => {
+  const templateRecord = await Template.findOne({
+    user_id: adminUserId,
+    name: templateName,
+  }).lean();
+  const bodyPlaceholderCount = getTemplateBodyPlaceholderCount(templateRecord);
+
+  if (!bodyPlaceholderCount) return [];
+
+  const values = [
+    registeredUser.full_name || 'there',
+    registeredUser.email || '',
+    registeredUser.phone || '',
+  ];
+
+  return [
+    {
+      type: 'body',
+      parameters: Array.from({ length: bodyPlaceholderCount }, (_, index) => ({
+        type: 'text',
+        text: values[index] || values[0],
+      })),
+    },
+  ];
+};
+
+const getAdminWhatsAppAccount = async () => {
+  const configuredAdminId = process.env.ADMIN_WHATSAPP_USER_ID;
+  if (configuredAdminId) {
+    const configuredAccount = await WhatsAppAccount.findOne({
+      user_id: configuredAdminId,
+      phone_number_id: { $exists: true, $ne: '' },
+      access_token: { $exists: true, $ne: '' },
+    });
+    if (configuredAccount) return configuredAccount;
+  }
+
+  const admins = await User.find({ role: 'admin' }).select('_id').sort({ createdAt: 1 });
+  if (!admins.length) return null;
+
+  return WhatsAppAccount.findOne({
+    user_id: { $in: admins.map((admin) => admin._id) },
+    phone_number_id: { $exists: true, $ne: '' },
+    access_token: { $exists: true, $ne: '' },
+  });
+};
+
+const sendWelcomeWhatsApp = async (registeredUser) => {
+  if (!registeredUser.phone) return;
+
+  const adminWaAccount = await getAdminWhatsAppAccount();
+  if (!adminWaAccount) {
+    console.warn('[Signup Welcome] No connected admin WhatsApp account found.');
+    return;
+  }
+
+  const recipientPhone = normalizePhone(registeredUser.phone);
+  if (!isValidPhone(recipientPhone)) {
+    console.warn('[Signup Welcome] Invalid recipient phone:', registeredUser.phone);
+    return;
+  }
+
+  const welcomeMessage =
+    process.env.WELCOME_WHATSAPP_MESSAGE ||
+    `Welcome to Yestick, ${registeredUser.full_name || 'there'}! Your account is ready.`;
+  const welcomeTemplateName = process.env.WELCOME_WHATSAPP_TEMPLATE_NAME;
+  const welcomeTemplateLanguage = process.env.WELCOME_WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
+  const endpoint = `${META_API}/${adminWaAccount.phone_number_id}/messages`;
+  const templateComponents = welcomeTemplateName
+    ? await buildWelcomeTemplateComponents(adminWaAccount.user_id, welcomeTemplateName, registeredUser)
+    : [];
+  const requestBody = welcomeTemplateName
+    ? {
+        messaging_product: 'whatsapp',
+        to: recipientPhone,
+        type: 'template',
+        template: {
+          name: welcomeTemplateName,
+          language: { code: welcomeTemplateLanguage },
+          ...(templateComponents.length ? { components: templateComponents } : {}),
+        },
+      }
+    : {
+        messaging_product: 'whatsapp',
+        to: recipientPhone,
+        type: 'text',
+        text: { body: welcomeMessage },
+      };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${adminWaAccount.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  });
+  const data = await response.json().catch(() => ({}));
+
+  const contact = await Contact.findOneAndUpdate(
+    { user_id: adminWaAccount.user_id, phone_number: recipientPhone },
+    {
+      $setOnInsert: {
+        user_id: adminWaAccount.user_id,
+        phone_number: recipientPhone,
+        name: registeredUser.full_name || recipientPhone,
+        email: registeredUser.email,
+      },
+    },
+    { upsert: true, new: true },
+  );
+
+  const conversation = await Conversation.findOneAndUpdate(
+    { user_id: adminWaAccount.user_id, contact_id: contact._id },
+    {
+      $set: {
+        phone_number: recipientPhone,
+        last_message: welcomeMessage,
+        last_message_at: new Date(),
+      },
+    },
+    { upsert: true, new: true },
+  );
+
+  await Message.create({
+    user_id: adminWaAccount.user_id,
+    conversation_id: conversation._id,
+    contact_id: contact._id,
+    direction: 'outbound',
+    message_type: welcomeTemplateName ? 'template' : 'text',
+    content: welcomeMessage,
+    template_name: welcomeTemplateName || undefined,
+    phone_number: recipientPhone,
+    whatsapp_message_id: data.messages?.[0]?.id,
+    status: response.ok ? 'sent' : 'failed',
+    error_details: response.ok ? undefined : data.error?.message || 'Failed to send welcome message',
+  });
+
+  if (!response.ok) {
+    console.warn('[Signup Welcome] Failed to send welcome WhatsApp:', data.error || data);
+  }
+};
 
 // ── OTP Handlers ──────────────────────────────────────────────────────────────
 router.post('/send-otp', async (req, res) => {
@@ -102,7 +262,9 @@ router.post('/reset-password', async (req, res) => {
 router.post('/signup', async (req, res) => {
   try {
     const { email, password, full_name } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const phone = normalizePhone(req.body.phone);
+    if (!email || !password || !phone) return res.status(400).json({ error: 'Email, password, and phone number required' });
+    if (!isValidPhone(phone)) return res.status(400).json({ error: 'Please enter a valid phone number with country code' });
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ error: 'Email already exists' });
@@ -112,14 +274,19 @@ router.post('/signup', async (req, res) => {
       email,
       password: hashedPassword,
       full_name: full_name || '',
+      phone,
       role: 'user',
       subscription: { plan: 'free', status: 'active', messages_used: 0, start_date: new Date() },
       wallet: { balance: 0 },
     });
 
+    sendWelcomeWhatsApp(user).catch((err) => {
+      console.error('[Signup Welcome] Unexpected error:', err.message);
+    });
+
     const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
-      user: { id: user._id, email: user.email, full_name: user.full_name, role: user.role },
+      user: { id: user._id, email: user.email, full_name: user.full_name, phone: user.phone, role: user.role },
       token,
     });
   } catch (err) {
@@ -137,7 +304,7 @@ router.post('/login', async (req, res) => {
     }
     const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
-      user: { id: user._id, email: user.email, full_name: user.full_name, role: user.role },
+      user: { id: user._id, email: user.email, full_name: user.full_name, phone: user.phone, role: user.role },
       token,
     });
   } catch (err) {
