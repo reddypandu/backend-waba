@@ -211,14 +211,53 @@ router.get("/me", requireAuth, async (req, res) => {
       {
         $group: {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-          sent: { $sum: 1 },
+          sent: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["sent", "delivered", "read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          delivered: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["delivered", "read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          read: {
+            $sum: {
+              $cond: [
+                { $in: ["$status", ["read", "replied"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          failed: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "failed"] }, 1, 0],
+            },
+          },
         },
       },
       { $sort: { _id: 1 } },
     ]);
 
     const dailyMap = Object.fromEntries(
-      dailyMessages.map((item) => [item._id, item.sent]),
+      dailyMessages.map((item) => [
+        item._id,
+        {
+          sent: item.sent,
+          delivered: item.delivered,
+          read: item.read,
+          failed: item.failed,
+        },
+      ]),
     );
 
     const chartData = [];
@@ -226,12 +265,13 @@ router.get("/me", requireAuth, async (req, res) => {
       const currentDate = new Date(sinceDate);
       currentDate.setDate(sinceDate.getDate() + i);
       const isoDate = currentDate.toISOString().slice(0, 10);
+      const dayData = dailyMap[isoDate] || { sent: 0, delivered: 0, read: 0, failed: 0 };
       chartData.push({
         name: currentDate.toLocaleDateString("en-US", {
           month: "short",
           day: "numeric",
         }),
-        sent: dailyMap[isoDate] || 0,
+        ...dayData,
       });
     }
 

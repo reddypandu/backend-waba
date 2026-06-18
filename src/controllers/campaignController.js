@@ -436,6 +436,8 @@ export class CampaignController {
             phone_number: 1,
             status: 1,
             error_details: 1,
+            whatsapp_message_id: 1,
+            createdAt: 1,
             updatedAt: 1,
             contact_id: { _id: "$contact_id._id", name: "$contact_id.name", phone_number: "$contact_id.phone_number", email: "$contact_id.email" },
             message_type: 1,

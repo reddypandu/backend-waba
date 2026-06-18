@@ -540,7 +540,7 @@ export class WebhookService {
               type: "reply",
               reply: {
                 id: button.id || button.title,
-                title: button.title,
+                title: String(button.title || "").substring(0, 20),
               },
             })),
           },
