@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth.js';
 import User from '../models/User.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import crypto from 'crypto';
+import { sendWhatsAppMessage, sendTemplateMessage } from '../utils/whatsappNotify.js';
 
 const router = Router();
 
@@ -94,8 +95,45 @@ router.post('/verify-payment', requireAuth, async (req, res) => {
       reference_id: razorpay_payment_id,
       status: 'completed',
     });
-
     res.json({ success: true, plan: normalizedPlan });
+
+    // SaaS WhatsApp notifications (non-blocking, try-catch wrapped)
+    (async () => {
+      try {
+        const istDate = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+        const expiryDateIST = new Date(end).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" });
+        const userPhone = (user.phone || '').replace(/\D/g, '');
+        const adminPhone = (process.env.ADMIN_WHATSAPP_NUMBER || '').replace(/\D/g, '');
+
+        // Send to USER — try template first, fall back to plain text if not approved yet
+        if (userPhone) {
+          try {
+            await sendTemplateMessage(userPhone, "upgrade_success", [user.full_name || 'there', expiryDateIST]);
+            console.log("[Upgrade Notifications] ✅ Template message sent to user:", userPhone);
+          } catch (templateErr) {
+            const isTemplateMissing = templateErr.message.includes('132001') || templateErr.message.toLowerCase().includes('template name does not exist');
+            if (isTemplateMissing) {
+              console.warn("[Upgrade Notifications] ⚠️ Template not approved yet, sending plain text fallback...");
+              const fallbackMsg = `💰 Payment Successful - YestickAI!\n\nHi ${user.full_name || 'there'}, your account upgraded to Paid Plan 🎉\n\n✅ Unlimited Contacts\n✅ Bulk WhatsApp Campaigns\n✅ Shared Team Inbox\n✅ Auto Replies & Workflows\n\n📅 Valid Until: ${expiryDateIST}\n💵 Amount: ₹30,000/year\n\n👉 Dashboard: https://yestickai.com/dashboard\n\nThank you for choosing YestickAI! 🚀\nTeam YestickAI`;
+              await sendWhatsAppMessage(userPhone, fallbackMsg);
+              console.log("[Upgrade Notifications] ✅ Fallback plain text sent to user:", userPhone);
+            } else {
+              throw templateErr;
+            }
+          }
+        }
+
+        // Send to ADMIN (plain text) — skip if sender & recipient are the same number
+        if (adminPhone && adminPhone !== userPhone) {
+          const adminMsg = `💰 New Payment - YestickAI!\n\n👤 Name: ${user.full_name || ''}\n📧 Email: ${user.email}\n📱 WhatsApp: ${user.phone}\n💵 Amount: ₹30,000/year\n🔖 Payment ID: ${razorpay_payment_id}\n📅 Date: ${istDate}\n\n👉 https://yestickai.com/admin/users`;
+          await sendWhatsAppMessage(adminPhone, adminMsg);
+          console.log("[Upgrade Notifications] ✅ Admin payment alert sent");
+        }
+      } catch (err) {
+        console.error("[Upgrade Notifications] Error sending notifications:", err.message);
+      }
+    })();
+
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

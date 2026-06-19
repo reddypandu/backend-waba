@@ -10,6 +10,7 @@ import Message from '../models/Message.js';
 import Template from '../models/Template.js';
 import { sendOtpEmail } from '../utils/mailer.js';
 import { normalizePhone } from '../utils/phoneUtils.js';
+import { sendWhatsAppMessage, sendTemplateMessage } from '../utils/whatsappNotify.js';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
@@ -280,18 +281,74 @@ router.post('/signup', async (req, res) => {
       wallet: { balance: 0 },
     });
 
-    sendWelcomeWhatsApp(user).catch((err) => {
-      console.error('[Signup Welcome] Unexpected error:', err.message);
-    });
-
-    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+    // Old welcome system disabled - replaced by new SaaS notification system below
+    // sendWelcomeWhatsApp(user).catch((err) => {
+    //   console.error('[Signup Welcome] Unexpected error:', err.message);
+    // });
+const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
       user: { id: user._id, email: user.email, full_name: user.full_name, phone: user.phone, role: user.role },
       token,
     });
+    // SaaS WhatsApp notifications (non-blocking, try-catch wrapped)
+   (async () => {
+  try {
+    const istDate = new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    });
+    const userPhone = (user.phone || "").replace(/\D/g, "");
+    const adminPhone = (process.env.ADMIN_WHATSAPP_NUMBER || "").replace(/\D/g, "");
+
+    // Send to USER — template first, fallback to plain text
+    if (userPhone) {
+      try {
+        await sendTemplateMessage(
+          userPhone,
+          "registration_success",
+          [user.full_name || "there", user.email]
+        );
+        console.log("[Signup] ✅ Template sent to user:", userPhone);
+      } catch (templateErr) {
+        const isTemplateMissing =
+          templateErr.message.includes("132001") ||
+          templateErr.message.toLowerCase().includes("template name does not exist");
+
+        if (isTemplateMissing) {
+          console.warn("[Signup] ⚠️ Template not approved, sending plain text...");
+          await sendWhatsAppMessage(
+            userPhone,
+            `🎉 Welcome to YestickAI, ${user.full_name || "there"}!\n\nYour account has been successfully created ✅\n\n📧 Email: ${user.email}\n📦 Plan: Free Trial\n\nWhat you can do now:\n✅ Connect your WhatsApp Business\n✅ Add up to 10 Contacts\n✅ Send Basic Messages\n\n👉 Login: https://yestickai.com/login\n\nNeed help? Reply anytime 😊\nTeam YestickAI`
+          );
+          console.log("[Signup] ✅ Fallback plain text sent to user:", userPhone);
+        } else {
+          throw templateErr;
+        }
+      }
+    }
+
+    // Send to ADMIN — skip if same number as user
+    if (adminPhone && adminPhone !== userPhone) {
+      await sendWhatsAppMessage(
+        adminPhone,
+        `🆕 New Registration - YestickAI!\n\n👤 Name: ${user.full_name || ""}\n📧 Email: ${user.email}\n📱 WhatsApp: ${user.phone}\n📦 Plan: Free Trial\n📅 Date: ${istDate}\n\n👉 https://yestickai.com/admin/users`
+      );
+      console.log("[Signup] ✅ Admin alert sent");
+    }
+  } catch (err) {
+    console.error("[Signup] ❌ Notification error:", err.message);
+  }
+})();
+
+    
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Alias /register to /signup
+router.post('/register', (req, res, next) => {
+  req.url = '/signup';
+  next();
 });
 
 // ── Login ────────────────────────────────────────────────────────────────────
