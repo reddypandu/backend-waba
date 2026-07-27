@@ -27,7 +27,7 @@ router.get('/plans', async (req, res) => {
       currency: "INR",
       features: [
         "Send bulk WhatsApp campaigns",
-        "Manage chats in a Shared Team Inbox & set up simple greeting / OOO automations",
+        "Manage chats & set up simple greeting / OOO automations",
         "Unlimited Messages (Based on your WhatsApp Number)",
         "Unlimited Contacts",
         "Auto Replies",
@@ -114,7 +114,7 @@ router.post('/verify-payment', requireAuth, async (req, res) => {
             const isTemplateMissing = templateErr.message.includes('132001') || templateErr.message.toLowerCase().includes('template name does not exist');
             if (isTemplateMissing) {
               console.warn("[Upgrade Notifications] ⚠️ Template not approved yet, sending plain text fallback...");
-              const fallbackMsg = `💰 Payment Successful - YestickAI!\n\nHi ${user.full_name || 'there'}, your account upgraded to Paid Plan 🎉\n\n✅ Unlimited Contacts\n✅ Bulk WhatsApp Campaigns\n✅ Shared Team Inbox\n✅ Auto Replies & Workflows\n\n📅 Valid Until: ${expiryDateIST}\n💵 Amount: ₹30,000/year\n\n👉 Dashboard: https://yestickai.com/dashboard\n\nThank you for choosing YestickAI! 🚀\nTeam YestickAI`;
+              const fallbackMsg = `💰 Payment Successful - YestickAI!\n\nHi ${user.full_name || 'there'}, your account upgraded to Paid Plan 🎉\n\n✅ Unlimited Contacts\n✅ Bulk WhatsApp Campaigns\n✅ Templates Management\n✅ Auto Replies & Workflows\n\n📅 Valid Until: ${expiryDateIST}\n💵 Amount: ₹30,000/year\n\n👉 Dashboard: https://yestickai.com/dashboard\n\nThank you for choosing YestickAI! 🚀\nTeam YestickAI`;
               await sendWhatsAppMessage(userPhone, fallbackMsg);
               console.log("[Upgrade Notifications] ✅ Fallback plain text sent to user:", userPhone);
             } else {
