@@ -86,14 +86,32 @@ router.post('/verify-payment', requireAuth, async (req, res) => {
       'subscription.end_date': end,
     }, { new: true });
 
+    const amountInRupees = amount > 100000 ? Math.round(amount / 100) : amount;
+    const planMetadata = {
+      plan_id: normalizedPlan,
+      plan_name: normalizedPlan === 'paid' ? 'Paid Plan' : 'Free Trial',
+      price: amountInRupees,
+      currency: 'INR',
+      features: [
+        "Send bulk WhatsApp campaigns",
+        "Manage chats & set up simple greeting / OOO automations",
+        "Unlimited Messages (Based on your WhatsApp Number)",
+        "Unlimited Contacts",
+        "Auto Replies",
+        "Auto Work flows"
+      ],
+      billing_cycle: 'yearly'
+    };
+
     await WalletTransaction.create({
       user_id: req.user.id,
       type: 'credit',
-      amount,
+      amount: amountInRupees,
       balance_after: user.wallet?.balance,
-      description: `Subscription payment for ${normalizedPlan} plan`,
+      description: `Subscription payment for ${normalizedPlan === 'paid' ? 'Paid' : 'Free'} Plan`,
       reference_id: razorpay_payment_id,
       status: 'completed',
+      metadata: planMetadata,
     });
     res.json({ success: true, plan: normalizedPlan });
 

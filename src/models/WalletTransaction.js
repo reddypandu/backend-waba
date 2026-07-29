@@ -8,6 +8,7 @@ const WalletTransactionSchema = new mongoose.Schema({
   description: { type: String },
   reference_id: { type: String },
   status: { type: String, default: 'completed' },
+  metadata: { type: mongoose.Schema.Types.Mixed },
 }, { timestamps: true });
 
 export default mongoose.model('WalletTransaction', WalletTransactionSchema);
