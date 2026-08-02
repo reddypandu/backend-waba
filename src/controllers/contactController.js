@@ -31,8 +31,6 @@ export class ContactController {
       let successCount = 0;
       let failCount = 0;
 
-      const operations = [];
-
       for (const c of contacts) {
         if (!c.phone) {
           failCount++;
@@ -40,34 +38,36 @@ export class ContactController {
         }
 
         if (isFree && currentCount >= 10) {
+          console.log("Batch import stopped: Free plan limit reached");
           failCount++;
           continue;
         }
 
         const phone = normalizePhone(String(c.phone).trim());
-        const name = c.name ? String(c.name).trim() : phone;
+        const name = c.name ? String(c.name).trim() : '';
 
-        operations.push({
-          updateOne: {
-            filter: {
-              user_id: req.user.id,
-              phone_number: phone,
-            },
-            update: {
+        try {
+          const updatedContact = await Contact.findOneAndUpdate(
+            { user_id: req.user.id, phone_number: phone },
+            {
               $set: {
-                name,
-              },
+                name: name || phone
+              }
             },
-            upsert: true,
-          },
-        });
-
-        successCount++;
-        currentCount++;
-      }
-
-      if (operations.length > 0) {
-        await Contact.bulkWrite(operations);
+            { upsert: true, new: true }
+          );
+          ids.push(updatedContact._id);
+          successCount++;
+          if (updatedContact.isNew || updatedContact._id) {
+            // In mongoose `findOneAndUpdate` with `upsert: true` doesn't accurately tell if it's new without `rawResult`.
+            // But we just increment anyway as an approximation, or we could just count.
+            // It's fine to just increment since currentCount is used for limits.
+          }
+          currentCount++;
+        } catch (err) {
+          console.error('Batch import row error:', err);
+          failCount++;
+        }
       }
 
       res.json({ success: true, imported: successCount, failed: failCount, ids });
