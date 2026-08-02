@@ -5,7 +5,7 @@ import User from '../models/User.js';
 import { normalizePhone } from '../utils/phoneUtils.js';
 
 export class ContactController {
-  
+
   static async getContacts(req, res) {
     try {
       const contacts = await Contact.find({ user_id: req.user.id }).sort({ createdAt: -1 });
@@ -31,6 +31,8 @@ export class ContactController {
       let successCount = 0;
       let failCount = 0;
 
+      const operations = [];
+
       for (const c of contacts) {
         if (!c.phone) {
           failCount++;
@@ -38,36 +40,34 @@ export class ContactController {
         }
 
         if (isFree && currentCount >= 10) {
-          console.log("Batch import stopped: Free plan limit reached");
           failCount++;
           continue;
         }
 
         const phone = normalizePhone(String(c.phone).trim());
-        const name = c.name ? String(c.name).trim() : '';
+        const name = c.name ? String(c.name).trim() : phone;
 
-        try {
-          const updatedContact = await Contact.findOneAndUpdate(
-            { user_id: req.user.id, phone_number: phone },
-            { 
-              $set: { 
-                  name: name || phone
-              }
+        operations.push({
+          updateOne: {
+            filter: {
+              user_id: req.user.id,
+              phone_number: phone,
             },
-            { upsert: true, new: true }
-          );
-          ids.push(updatedContact._id);
-          successCount++;
-          if (updatedContact.isNew || updatedContact._id) {
-             // In mongoose `findOneAndUpdate` with `upsert: true` doesn't accurately tell if it's new without `rawResult`.
-             // But we just increment anyway as an approximation, or we could just count.
-             // It's fine to just increment since currentCount is used for limits.
-          }
-          currentCount++;
-        } catch(err) {
-          console.error('Batch import row error:', err);
-          failCount++;
-        }
+            update: {
+              $set: {
+                name,
+              },
+            },
+            upsert: true,
+          },
+        });
+
+        successCount++;
+        currentCount++;
+      }
+
+      if (operations.length > 0) {
+        await Contact.bulkWrite(operations);
       }
 
       res.json({ success: true, imported: successCount, failed: failCount, ids });
@@ -83,8 +83,8 @@ export class ContactController {
       if ((user?.subscription?.plan || 'paid') === 'free') { // Existing users without a plan are 'paid'
         const count = await Contact.countDocuments({ user_id: req.user.id });
         if (count >= 10) {
-          return res.status(403).json({ 
-            error: "Free plan limit reached (10 contacts). Please upgrade to add more." 
+          return res.status(403).json({
+            error: "Free plan limit reached (10 contacts). Please upgrade to add more."
           });
         }
       }
@@ -106,14 +106,14 @@ export class ContactController {
 
       const contact = await Contact.findOneAndUpdate(
         { user_id: req.user.id, phone_number: cleanedPhone },
-        { 
-          $set: { 
-            name, 
-            email, 
-            tags: tags || [], 
+        {
+          $set: {
+            name,
+            email,
+            tags: tags || [],
             opt_in_status: opt_in_status || 'opted_in',
             custom_attributes: custom_attributes || {}
-          } 
+          }
         },
         { upsert: true, new: true }
       );
@@ -126,7 +126,7 @@ export class ContactController {
 
   static async importCsv(req, res) {
     if (!req.file) return res.status(400).json({ error: 'CSV file required' });
-    
+
     const user = await User.findById(req.user.id);
     const isFree = (user?.subscription?.plan || 'paid') === 'free'; // Existing users without a plan are 'paid'
     let currentCount = isFree ? await Contact.countDocuments({ user_id: req.user.id }) : 0;
@@ -138,13 +138,13 @@ export class ContactController {
     // Use a stream if we have the file on disk (req.file.path from multer)
     // Assuming multer is configured to save to disk or memory. 
     // If memoryStorage is used (like in whatsapp.js), we can use stream-ifier or just string split.
-    
+
     const bufferString = req.file.buffer.toString('utf8');
     const lines = bufferString.split('\n');
     const headers = lines[0]?.split(',').map(h => h.trim().toLowerCase());
 
     if (!headers || !headers.includes('phone')) {
-        return res.status(400).json({ error: 'CSV must contain a "phone" column header' });
+      return res.status(400).json({ error: 'CSV must contain a "phone" column header' });
     }
 
     const phoneIdx = headers.indexOf('phone');
@@ -153,48 +153,48 @@ export class ContactController {
     const tagsIdx = headers.indexOf('tags'); // comma separated
 
     for (let i = 1; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        const columns = lines[i].split(',');
-        
-        let phone = columns[phoneIdx]?.trim();
-        if (!phone) {
-            failCount++;
-            continue;
-        }
+      if (!lines[i].trim()) continue;
+      const columns = lines[i].split(',');
 
-        if (isFree && currentCount >= 10) {
-            console.log("Import stopped: Free plan limit reached");
-            failCount++;
-            continue;
-        }
-        phone = normalizePhone(phone); // normalize phone number with country code handling
+      let phone = columns[phoneIdx]?.trim();
+      if (!phone) {
+        failCount++;
+        continue;
+      }
 
-        const name = nameIdx !== -1 ? columns[nameIdx]?.trim() : '';
-        const email = emailIdx !== -1 ? columns[emailIdx]?.trim() : '';
-        let tags = [];
-        if (tagsIdx !== -1 && columns[tagsIdx]) {
-            tags = columns[tagsIdx].split(';').map(t => t.trim()).filter(Boolean); // assume semicolons for array
-            if (tags.length > 15) tags = tags.slice(0, 15); // Enforce 15 tags limit during import
-        }
+      if (isFree && currentCount >= 10) {
+        console.log("Import stopped: Free plan limit reached");
+        failCount++;
+        continue;
+      }
+      phone = normalizePhone(phone); // normalize phone number with country code handling
 
-        try {
-            await Contact.findOneAndUpdate(
-                { user_id: req.user.id, phone_number: phone },
-                { 
-                  $set: { 
-                      name: name || phone,
-                      email: email || undefined
-                  },
-                  $addToSet: { tags: { $each: tags } } // Merge tags
-                },
-                { upsert: true }
-            );
-            successCount++;
-            currentCount++;
-        } catch(err) {
-            console.error('Import row error:', err);
-            failCount++;
-        }
+      const name = nameIdx !== -1 ? columns[nameIdx]?.trim() : '';
+      const email = emailIdx !== -1 ? columns[emailIdx]?.trim() : '';
+      let tags = [];
+      if (tagsIdx !== -1 && columns[tagsIdx]) {
+        tags = columns[tagsIdx].split(';').map(t => t.trim()).filter(Boolean); // assume semicolons for array
+        if (tags.length > 15) tags = tags.slice(0, 15); // Enforce 15 tags limit during import
+      }
+
+      try {
+        await Contact.findOneAndUpdate(
+          { user_id: req.user.id, phone_number: phone },
+          {
+            $set: {
+              name: name || phone,
+              email: email || undefined
+            },
+            $addToSet: { tags: { $each: tags } } // Merge tags
+          },
+          { upsert: true }
+        );
+        successCount++;
+        currentCount++;
+      } catch (err) {
+        console.error('Import row error:', err);
+        failCount++;
+      }
     }
 
     res.json({ success: true, imported: successCount, failed: failCount });
