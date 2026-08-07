@@ -26,83 +26,9 @@ export class CampaignController {
   static async getCampaigns(req, res) {
     try {
       const userIds = legacyIdValues(req.user.id);
-      const campaigns = await Campaign.aggregate([
-        { $match: { user_id: { $in: userIds } } },
-        { $sort: { createdAt: -1 } },
-        {
-          $lookup: {
-            from: "messages",
-            let: {
-              campaignId: "$_id",
-              campaignIdString: { $toString: "$_id" },
-            },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $or: [
-                      { $eq: ["$campaign_id", "$$campaignId"] },
-                      { $eq: ["$campaign_id", "$$campaignIdString"] },
-                    ],
-                  },
-                  user_id: { $in: userIds },
-                },
-              },
-            ],
-            as: "msgs",
-          },
-        },
-        {
-          $addFields: {
-            stats: {
-              sent: {
-                $size: {
-                  $filter: {
-                    input: "$msgs",
-                    as: "m",
-                    cond: {
-                      $in: [
-                        "$$m.status",
-                        ["sent", "delivered", "read", "replied"],
-                      ],
-                    },
-                  },
-                },
-              },
-              delivered: {
-                $size: {
-                  $filter: {
-                    input: "$msgs",
-                    as: "m",
-                    cond: {
-                      $in: ["$$m.status", ["delivered", "read", "replied"]],
-                    },
-                  },
-                },
-              },
-              read: {
-                $size: {
-                  $filter: {
-                    input: "$msgs",
-                    as: "m",
-                    cond: { $in: ["$$m.status", ["read", "replied"]] },
-                  },
-                },
-              },
-              failed: {
-                $size: {
-                  $filter: {
-                    input: "$msgs",
-                    as: "m",
-                    cond: { $eq: ["$$m.status", "failed"] },
-                  },
-                },
-              },
-            },
-          },
-        },
-        { $project: { msgs: 0 } },
-      ]);
+      const campaigns = await Campaign.find({ user_id: { $in: userIds } })
+        .sort({ createdAt: -1 })
+        .lean();
       res.json({ campaigns });
     } catch (err) {
       res.status(500).json({ error: err.message });
