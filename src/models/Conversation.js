@@ -11,6 +11,8 @@ const ConversationSchema = new mongoose.Schema({
   workflow_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Workflow' },
   workflow_step_id: { type: String },
   workflow_data: { type: mongoose.Schema.Types.Mixed },
+  is_pinned_followup: { type: Boolean, default: false },
+  is_pinned_important: { type: Boolean, default: false },
 }, { timestamps: true });
 
 export default mongoose.model('Conversation', ConversationSchema);

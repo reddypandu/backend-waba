@@ -560,6 +560,34 @@ router.get("/conversations", requireAuth, async (req, res) => {
   }
 });
 
+router.patch("/conversations/:id/pin", requireAuth, async (req, res) => {
+  try {
+    const { type, value } = req.body;
+    const update = {};
+    if (type === 'followup') {
+      update.is_pinned_followup = value;
+    } else if (type === 'important') {
+      update.is_pinned_important = value;
+    } else {
+      return res.status(400).json({ error: "Invalid pin type" });
+    }
+
+    const conv = await Conversation.findOneAndUpdate(
+      { _id: req.params.id, user_id: req.user.id },
+      update,
+      { new: true }
+    ).populate("contact_id");
+
+    if (!conv) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    res.json({ conversation: conv });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get("/messages/:convId", requireAuth, async (req, res) => {
   try {
     const messages = await Message.find({

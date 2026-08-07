@@ -27,7 +27,8 @@ export class ContactController {
       const isFree = (user?.subscription?.plan || 'paid') === 'free';
       let currentCount = isFree ? await Contact.countDocuments({ user_id: req.user.id }) : 0;
 
-      const ids = [];
+      const bulkOps = [];
+      const validPhones = [];
       let successCount = 0;
       let failCount = 0;
 
@@ -46,27 +47,33 @@ export class ContactController {
         const phone = normalizePhone(String(c.phone).trim());
         const name = c.name ? String(c.name).trim() : '';
 
-        try {
-          const updatedContact = await Contact.findOneAndUpdate(
-            { user_id: req.user.id, phone_number: phone },
-            {
-              $set: {
-                name: name || phone
-              }
-            },
-            { upsert: true, new: true }
-          );
-          ids.push(updatedContact._id);
-          successCount++;
-          if (updatedContact.isNew || updatedContact._id) {
-            // In mongoose `findOneAndUpdate` with `upsert: true` doesn't accurately tell if it's new without `rawResult`.
-            // But we just increment anyway as an approximation, or we could just count.
-            // It's fine to just increment since currentCount is used for limits.
+        bulkOps.push({
+          updateOne: {
+            filter: { user_id: req.user.id, phone_number: phone },
+            update: { $set: { name: name || phone } },
+            upsert: true
           }
-          currentCount++;
+        });
+        
+        validPhones.push(phone);
+        currentCount++;
+      }
+
+      const ids = [];
+      if (bulkOps.length > 0) {
+        try {
+          await Contact.bulkWrite(bulkOps, { ordered: false });
+          // Fetch the updated contacts to get their IDs
+          const updatedContacts = await Contact.find({
+            user_id: req.user.id,
+            phone_number: { $in: validPhones }
+          }, { _id: 1 });
+          
+          ids.push(...updatedContacts.map(c => c._id));
+          successCount = validPhones.length;
         } catch (err) {
-          console.error('Batch import row error:', err);
-          failCount++;
+          console.error('Bulk write error:', err);
+          failCount += bulkOps.length; // If bulk fails entirely, mark as failed
         }
       }
 
