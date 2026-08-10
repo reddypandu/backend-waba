@@ -444,6 +444,8 @@ export class WebhookService {
         conversation.workflow_id = null;
         conversation.workflow_step_id = null;
         await conversation.save().catch(() => {});
+      } else {
+        isContinuation = true;
       }
     }
 
