@@ -538,54 +538,70 @@ export class WebhookService {
         const bookAction = workflow.actions.find(a => a.id === actionId);
 
         if (bookAction) {
-          // Save the booking
-          const BookingSlot = (await import('../models/BookingSlot.js')).BookingSlot;
-          const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
-          const Contact = (await import('../models/Contact.js')).default;
-          
-          const contact = await Contact.findById(contactId);
-          const customerName = contact?.name || "Customer";
+          try {
+            // Save the booking
+            const BookingSlot = (await import('../models/BookingSlot.js')).BookingSlot;
+            const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+            const Contact = (await import('../models/Contact.js')).default;
+            
+            const contact = await Contact.findById(contactId);
+            const customerName = contact?.name || "Customer";
 
-          const booking = await BookingSlot.create({
-            user_id: userId,
-            workflow_id: workflow._id,
-            date: selectedDate,
-            time: selectedTime,
-            status: 'booked',
-            booked_by_contact_id: contactId,
-            booked_by_name: customerName,
-            booked_by_phone: conversation.phone_number
-          });
+            let booking = await BookingSlot.findOne({
+              user_id: userId,
+              workflow_id: workflow._id,
+              date: selectedDate,
+              time: selectedTime
+            });
 
-          // Create transaction for payment
-          const nextActionId = bookAction.next_step;
-          const nextAction = workflow.actions.find(a => a.id === nextActionId);
-          let amount = 0;
-          let upiId = "";
-          if (nextAction && nextAction.type === 'payment_invoice') {
-            amount = nextAction.amount || 0;
-            upiId = nextAction.upiId || nextAction.upi_id || "";
+            if (!booking) {
+              booking = await BookingSlot.create({
+                user_id: userId,
+                workflow_id: workflow._id,
+                date: selectedDate,
+                time: selectedTime,
+                status: 'booked',
+                booked_by_contact_id: contactId,
+                booked_by_name: customerName,
+                booked_by_phone: conversation.phone_number
+              }).catch(async () => null);
+            }
+
+            // Create transaction for payment
+            const nextActionId = bookAction.next_step;
+            const nextAction = workflow.actions.find(a => a.id === nextActionId);
+            let amount = 0;
+            let upiId = "";
+            if (nextAction && nextAction.type === 'payment_invoice') {
+              amount = nextAction.amount || 0;
+              upiId = nextAction.upiId || nextAction.upi_id || "";
+            }
+
+            await WorkflowTransaction.create({
+              user_id: userId,
+              workflow_id: workflow._id,
+              contact_id: contactId,
+              conversation_id: convId,
+              customer_name: customerName,
+              phone_number: conversation.phone_number,
+              service_name: workflow.name,
+              meeting_date: new Date(selectedDate),
+              meeting_time: selectedTime,
+              meeting_id: booking ? booking._id.toString() : "",
+              payment_amount: amount,
+              upi_id: upiId,
+              payment_status: amount > 0 ? 'pending' : 'completed'
+            }).catch(() => {});
+
+            // The booking is complete, now move to the next step
+            action = nextAction;
+            isContinuation = true;
+          } catch (err) {
+            console.error("[Workflow] Error during time selection booking:", err.message);
+            const nextActionId = bookAction.next_step;
+            action = workflow.actions.find(a => a.id === nextActionId);
+            isContinuation = true;
           }
-
-          await WorkflowTransaction.create({
-            user_id: userId,
-            workflow_id: workflow._id,
-            contact_id: contactId,
-            conversation_id: convId,
-            customer_name: customerName,
-            phone_number: conversation.phone_number,
-            service_name: workflow.name,
-            meeting_date: new Date(selectedDate),
-            meeting_time: selectedTime,
-            meeting_id: booking._id.toString(),
-            payment_amount: amount,
-            upi_id: upiId,
-            payment_status: amount > 0 ? 'pending' : 'completed'
-          });
-
-          // The booking is complete, now move to the next step
-          action = nextAction;
-          isContinuation = true;
         }
       }
 
@@ -875,7 +891,7 @@ export class WebhookService {
     }
 
     const endpoint = `${META_API}/${phoneNumberId}/messages`;
-    const r = await fetch(endpoint, {
+    let r = await fetch(endpoint, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -883,7 +899,41 @@ export class WebhookService {
       },
       body: JSON.stringify(requestBody),
     });
-    const data = await r.json();
+    let data = await r.json();
+
+    if (!r.ok && requestBody?.interactive?.type === "payment") {
+      console.warn("[Workflow] Native payment message rejected by Meta API, falling back to CTA URL button:", data.error?.message);
+      const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+      const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+      const payUrl = `${frontendUrl}/b/pay/upi/${tx?._id || 'unknown'}`;
+      
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "cta_url",
+          body: { text: `${content}\n\nAmount: ₹${action.amount || 0}` },
+          action: {
+            name: "cta_url",
+            parameters: {
+              display_text: "Pay Now",
+              url: payUrl
+            }
+          }
+        },
+      };
+
+      r = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
+      data = await r.json();
+    }
 
     if (!r.ok) {
       console.error("[Workflow] Failed to send action", {
