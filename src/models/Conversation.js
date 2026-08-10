@@ -15,4 +15,7 @@ const ConversationSchema = new mongoose.Schema({
   is_pinned_important: { type: Boolean, default: false },
 }, { timestamps: true });
 
+ConversationSchema.index({ user_id: 1, last_message_at: -1 });
+ConversationSchema.index({ user_id: 1, phone_number: 1 });
+
 export default mongoose.model('Conversation', ConversationSchema);

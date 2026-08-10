@@ -551,11 +551,53 @@ router.get("/conversations", requireAuth, async (req, res) => {
         error: "Shared Inbox is a premium feature. Please upgrade to view and reply to messages." 
       });
     }
-    const convs = await Conversation.find({ user_id: req.user.id })
-      .populate("contact_id")
-      .sort({ last_message_at: -1 });
-    res.json({ conversations: convs });
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search ? req.query.search.trim() : "";
+    const skip = (page - 1) * limit;
+
+    let query = { user_id: req.user.id };
+
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+      
+      const matchingContacts = await Contact.find({
+        user_id: req.user.id,
+        $or: [
+          { name: searchRegex },
+          { phone_number: searchRegex }
+        ]
+      }, '_id');
+      
+      const contactIds = matchingContacts.map(c => c._id);
+
+      query = {
+        user_id: req.user.id,
+        $or: [
+          { phone_number: searchRegex },
+          { contact_id: { $in: contactIds } }
+        ]
+      };
+    }
+
+    const [convs, total] = await Promise.all([
+      Conversation.find(query)
+        .populate("contact_id")
+        .sort({ last_message_at: -1 })
+        .skip(skip)
+        .limit(limit),
+      Conversation.countDocuments(query)
+    ]);
+
+    res.json({ 
+      conversations: convs,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit)
+    });
   } catch (err) {
+    console.error("Fetch conversations error:", err);
     res.status(500).json({ error: err.message });
   }
 });
