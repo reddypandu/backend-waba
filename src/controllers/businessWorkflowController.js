@@ -144,9 +144,17 @@ export class BusinessWorkflowController {
   static async getTransaction(req, res) {
     try {
       const { transactionId } = req.params;
-      const transaction = await WorkflowTransaction.findById(transactionId);
+      let transaction = await WorkflowTransaction.findById(transactionId).lean();
       if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
       
+      const Business = (await import('../models/Business.js')).default;
+      const User = (await import('../models/User.js')).default;
+      
+      const biz = await Business.findOne({ user_id: transaction.user_id });
+      const usr = await User.findById(transaction.user_id);
+      
+      transaction.business_name = biz?.name || usr?.full_name || 'Business';
+
       res.json({ success: true, transaction });
     } catch (err) {
       res.status(500).json({ error: err.message });
