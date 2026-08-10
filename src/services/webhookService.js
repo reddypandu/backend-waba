@@ -472,9 +472,9 @@ export class WebhookService {
     if (workflow && isContinuation !== false) {
       // INTERCEPT NATIVE CALENDAR SELECTIONS
       if (interactiveReplyId && interactiveReplyId.startsWith("date_")) {
-        const parts = interactiveReplyId.split("_"); // "date", "2026-08-10", "action123"
+        const parts = interactiveReplyId.split("_"); // "date", "2026-08-10", "step", "jerr6ur"
         const selectedDate = parts[1];
-        const actionId = parts[2];
+        const actionId = parts.slice(2).join("_");
         const bookAction = workflow.actions.find(a => a.id === actionId);
         
         if (bookAction) {
@@ -531,10 +531,10 @@ export class WebhookService {
       }
 
       if (interactiveReplyId && interactiveReplyId.startsWith("time_")) {
-        const parts = interactiveReplyId.split("_"); // "time", "2026-08-10", "09:00", "action123"
+        const parts = interactiveReplyId.split("_"); // "time", "2026-08-10", "09:00", "step", "jerr6ur"
         const selectedDate = parts[1];
         const selectedTime = parts[2];
-        const actionId = parts[3];
+        const actionId = parts.slice(3).join("_");
         const bookAction = workflow.actions.find(a => a.id === actionId);
 
         if (bookAction) {
