@@ -425,16 +425,29 @@ export class WebhookService {
     let action = null;
     let isContinuation = false;
 
-    if (conversation.workflow_id && conversation.workflow_step_id) {
+    // Check if user sent an explicit keyword trigger that matches a workflow
+    const keywordMatch = workflows.find(wf => {
+      if (wf.trigger_type === "keyword_match" && wf.trigger_value) {
+        const trigger = String(wf.trigger_value).trim().toLowerCase();
+        return normalizedText === trigger || normalizedText.includes(trigger);
+      }
+      return false;
+    });
+
+    if (keywordMatch && (!interactiveReplyId || (!interactiveReplyId.startsWith("date_") && !interactiveReplyId.startsWith("time_")))) {
+      workflow = keywordMatch;
+      action = workflow.actions?.[0];
+      isContinuation = false;
+    } else if (conversation.workflow_id && conversation.workflow_step_id) {
       workflow = await Workflow.findById(conversation.workflow_id);
       if (!workflow) {
         conversation.workflow_id = null;
         conversation.workflow_step_id = null;
-        await conversation.save();
+        await conversation.save().catch(() => {});
       }
     }
 
-    if (workflow) {
+    if (workflow && isContinuation !== false) {
       // INTERCEPT NATIVE CALENDAR SELECTIONS
       if (interactiveReplyId && interactiveReplyId.startsWith("date_")) {
         const parts = interactiveReplyId.split("_"); // "date", "2026-08-10", "action123"
@@ -558,7 +571,17 @@ export class WebhookService {
         action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
         isContinuation = Boolean(action);
       }
-    } else {
+
+      if (!action) {
+        // Workflow reached end. Clear step so new triggers can match in the future!
+        conversation.workflow_id = null;
+        conversation.workflow_step_id = null;
+        await conversation.save().catch(() => {});
+        workflow = null;
+      }
+    }
+
+    if (!workflow) {
       // Sort workflows so keyword matches take precedence over catch-all message_received triggers
       const sortedWorkflows = [...workflows].sort((a, b) => {
         if (a.trigger_type === "keyword_match" && b.trigger_type !== "keyword_match") return -1;
