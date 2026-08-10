@@ -53,7 +53,12 @@ export class AutomationController {
   // Workflows (More advanced automations)
   static async getWorkflows(req, res) {
     try {
-      const workflows = await Workflow.find({ user_id: req.user.id }).sort({ createdAt: -1 });
+      const { type } = req.query;
+      const query = { user_id: req.user.id };
+      if (type) query.workflow_type = type;
+      else query.workflow_type = { $ne: 'business' }; // Default standard workflows
+      
+      const workflows = await Workflow.find(query).sort({ createdAt: -1 });
       res.json({ workflows });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -62,7 +67,12 @@ export class AutomationController {
 
   static async getWorkflowAnalytics(req, res) {
     try {
-      const workflows = await Workflow.find({ user_id: req.user.id })
+      const { type } = req.query;
+      const query = { user_id: req.user.id };
+      if (type) query.workflow_type = type;
+      else query.workflow_type = { $ne: 'business' };
+      
+      const workflows = await Workflow.find(query)
         .select('name trigger_type trigger_value is_active actions analytics createdAt updatedAt')
         .sort({ updatedAt: -1 });
 

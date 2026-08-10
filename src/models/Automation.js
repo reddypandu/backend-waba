@@ -13,6 +13,7 @@ AutoReplySchema.index({ user_id: 1, keyword: 1 }, { unique: true });
 const WorkflowSchema = new mongoose.Schema({
   user_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
+  workflow_type: { type: String, enum: ['standard', 'business'], default: 'standard' },
   trigger_type: { type: String, enum: ['message_received', 'contact_created', 'keyword_match', 'schedule'], default: 'keyword_match' },
   trigger_value: { type: String },
   actions: { type: mongoose.Schema.Types.Mixed, default: [] },

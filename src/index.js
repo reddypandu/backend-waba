@@ -22,6 +22,7 @@ import automationRoutes from "./routes/automation.js";
 import { startCampaignWorker } from "./workers/campaignWorker.js";
 import publicApiRoutes from "./routes/publicApi.js";
 import metaRoutes from "./routes/meta.js";
+import businessRoutes from "./routes/business.js";
 
 // Register Models
 import "./models/User.js";
@@ -113,6 +114,7 @@ app.use("/api/campaigns", campaignsRoutes);
 app.use("/api/team", teamRoutes);
 app.use("/api/automation", automationRoutes);
 app.use("/api/meta", metaRoutes);
+app.use("/api/business", businessRoutes);
 app.use("/api/v1", publicApiRoutes);
 
 app.get("/", (req, res) =>

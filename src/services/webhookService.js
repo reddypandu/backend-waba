@@ -435,8 +435,129 @@ export class WebhookService {
     }
 
     if (workflow) {
-      action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
-      isContinuation = Boolean(action);
+      // INTERCEPT NATIVE CALENDAR SELECTIONS
+      if (interactiveReplyId && interactiveReplyId.startsWith("date_")) {
+        const parts = interactiveReplyId.split("_"); // "date", "2026-08-10", "action123"
+        const selectedDate = parts[1];
+        const actionId = parts[2];
+        const bookAction = workflow.actions.find(a => a.id === actionId);
+        
+        if (bookAction) {
+          // Generate time slots based on action settings
+          const startTime = bookAction.startTime || "09:00";
+          const endTime = bookAction.endTime || "17:00";
+          const slotDuration = bookAction.slotDuration || 30;
+          
+          const slots = [];
+          const [startHour, startMin] = startTime.split(':').map(Number);
+          const [endHour, endMin] = endTime.split(':').map(Number);
+          
+          let current = new Date();
+          current.setHours(startHour, startMin, 0, 0);
+          const end = new Date();
+          end.setHours(endHour, endMin, 0, 0);
+          
+          while (current < end && slots.length < 10) {
+            const hh = String(current.getHours()).padStart(2, '0');
+            const mm = String(current.getMinutes()).padStart(2, '0');
+            const timeStr = `${hh}:${mm}`;
+            slots.push({
+              id: `time_${selectedDate}_${timeStr}_${actionId}`,
+              title: timeStr
+            });
+            current.setMinutes(current.getMinutes() + slotDuration);
+          }
+
+          if (slots.length === 0) slots.push({ id: `time_${selectedDate}_none_${actionId}`, title: "No slots available" });
+
+          // Send "Select Time" list
+          const requestBody = {
+            messaging_product: "whatsapp",
+            to: conversation.phone_number.replace(/^\+/, ""),
+            type: "interactive",
+            interactive: {
+              type: "list",
+              header: { type: "text", text: "Select Time" },
+              body: { text: `You selected ${selectedDate}. Please choose a time slot:` },
+              action: {
+                button: "Select Time",
+                sections: [{ title: "Available Times", rows: slots }]
+              }
+            }
+          };
+
+          await fetch(`${META_API}/${phoneNumberId}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody)
+          });
+          return true; // We handled it
+        }
+      }
+
+      if (interactiveReplyId && interactiveReplyId.startsWith("time_")) {
+        const parts = interactiveReplyId.split("_"); // "time", "2026-08-10", "09:00", "action123"
+        const selectedDate = parts[1];
+        const selectedTime = parts[2];
+        const actionId = parts[3];
+        const bookAction = workflow.actions.find(a => a.id === actionId);
+
+        if (bookAction) {
+          // Save the booking
+          const BookingSlot = (await import('../models/BookingSlot.js')).BookingSlot;
+          const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+          const Contact = (await import('../models/Contact.js')).default;
+          
+          const contact = await Contact.findById(contactId);
+          const customerName = contact?.name || "Customer";
+
+          const booking = await BookingSlot.create({
+            user_id: userId,
+            workflow_id: workflow._id,
+            date: selectedDate,
+            time: selectedTime,
+            status: 'booked',
+            booked_by_contact_id: contactId,
+            booked_by_name: customerName,
+            booked_by_phone: conversation.phone_number
+          });
+
+          // Create transaction for payment
+          const nextActionId = bookAction.next_step;
+          const nextAction = workflow.actions.find(a => a.id === nextActionId);
+          let amount = 0;
+          let upiId = "";
+          if (nextAction && nextAction.type === 'payment_invoice') {
+            amount = nextAction.amount || 0;
+            upiId = nextAction.upiId || "";
+          }
+
+          await WorkflowTransaction.create({
+            user_id: userId,
+            workflow_id: workflow._id,
+            contact_id: contactId,
+            conversation_id: convId,
+            customer_name: customerName,
+            phone_number: conversation.phone_number,
+            service_name: workflow.name,
+            meeting_date: new Date(selectedDate),
+            meeting_time: selectedTime,
+            meeting_id: booking._id.toString(),
+            payment_amount: amount,
+            upi_id: upiId,
+            payment_status: amount > 0 ? 'pending' : 'completed'
+          });
+
+          // The booking is complete, now move to the next step
+          action = nextAction;
+          isContinuation = true;
+        }
+      }
+
+      if (!action) {
+        action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
+        isContinuation = Boolean(action);
+      }
     } else {
       for (const wf of workflows) {
         if (wf.trigger_type === "message_received") {
@@ -526,7 +647,71 @@ export class WebhookService {
     let messageType = "text";
     let content = action.text || "";
 
-    if (action.type === "send_buttons") {
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+
+    if (action.type === "book_meeting") {
+      content = content || `Please choose a date and time for your meeting.`;
+      
+      const dates = [];
+      const today = new Date();
+      for (let i = 1; i <= 7; i++) {
+        const d = new Date(today);
+        d.setDate(d.getDate() + i);
+        // We embed the action id to know which meeting node this is
+        const dateStr = d.toISOString().split('T')[0];
+        const id = `date_${dateStr}_${action.id}`;
+        const title = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        dates.push({
+          id,
+          title: title.substring(0, 24)
+        });
+      }
+
+      messageType = "interactive";
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          header: { type: "text", text: "Book Meeting" },
+          body: { text: content },
+          action: {
+            button: "Select Date",
+            sections: [
+              {
+                title: "Available Dates",
+                rows: dates
+              }
+            ]
+          }
+        }
+      };
+    } else if (action.type === "payment_invoice") {
+      const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+      const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+      
+      const payUrl = `${frontendUrl}/b/pay/upi/${tx?._id || 'unknown'}`;
+      content = content || `Please complete your payment.`;
+      
+      messageType = "interactive";
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "cta_url",
+          body: { text: `${content}\n\nAmount: ₹${action.amount || 0}` },
+          action: {
+            name: "cta_url",
+            parameters: {
+              display_text: "Pay Now",
+              url: payUrl
+            }
+          }
+        },
+      };
+    } else if (action.type === "send_buttons") {
       messageType = "interactive";
       requestBody = {
         messaging_product: "whatsapp",
