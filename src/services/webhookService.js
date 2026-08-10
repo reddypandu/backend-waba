@@ -559,7 +559,14 @@ export class WebhookService {
         isContinuation = Boolean(action);
       }
     } else {
-      for (const wf of workflows) {
+      // Sort workflows so keyword matches take precedence over catch-all message_received triggers
+      const sortedWorkflows = [...workflows].sort((a, b) => {
+        if (a.trigger_type === "keyword_match" && b.trigger_type !== "keyword_match") return -1;
+        if (a.trigger_type !== "keyword_match" && b.trigger_type === "keyword_match") return 1;
+        return 0;
+      });
+
+      for (const wf of sortedWorkflows) {
         if (wf.trigger_type === "message_received") {
           action = wf.actions?.[0];
         } else if (wf.trigger_type === "keyword_match" && wf.trigger_value) {
@@ -595,6 +602,37 @@ export class WebhookService {
         },
       ).catch(() => {});
     }
+
+    // Fast-forward through non-blocking nodes
+    let loopCount = 0;
+    while (action && ["condition", "save_data", "delay"].includes(action.type)) {
+      if (loopCount++ > 50) {
+        console.error("Workflow fast-forward loop limit reached (infinite loop detected).");
+        action = null;
+        break;
+      }
+      if (action.type === "condition") {
+        let matches = true;
+        if (action.conditionKeyword) {
+          const keyword = String(action.conditionKeyword).trim().toLowerCase();
+          matches = (normalizedText === keyword || normalizedText.includes(keyword));
+        }
+        if (matches && action.next_step) {
+          action = workflow.actions?.find(a => a.id === action.next_step);
+        } else {
+          action = null;
+        }
+      } else if (action.type === "save_data" || action.type === "delay") {
+        // Automatically proceed to the next step
+        if (action.next_step) {
+          action = workflow.actions?.find(a => a.id === action.next_step);
+        } else {
+          action = null;
+        }
+      }
+    }
+
+    if (!action) return false;
 
     const sent = await this.executeWorkflowAction(
       workflow,
