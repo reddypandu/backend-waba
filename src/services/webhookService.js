@@ -529,7 +529,7 @@ export class WebhookService {
           let upiId = "";
           if (nextAction && nextAction.type === 'payment_invoice') {
             amount = nextAction.amount || 0;
-            upiId = nextAction.upiId || "";
+            upiId = nextAction.upiId || nextAction.upi_id || "";
           }
 
           await WorkflowTransaction.create({
@@ -727,7 +727,29 @@ export class WebhookService {
       };
     } else if (action.type === "payment_invoice") {
       const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
-      const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+      let tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+      
+      const nodeUpiId = action.upiId || action.upi_id || "";
+      const nodeAmount = action.amount !== undefined ? action.amount : 0;
+
+      if (!tx) {
+        tx = await WorkflowTransaction.create({
+          user_id: workflow.user_id,
+          workflow_id: workflow._id,
+          contact_id: contactId,
+          conversation_id: convId,
+          customer_name: conversation.phone_number,
+          phone_number: conversation.phone_number,
+          service_name: workflow.name,
+          payment_amount: nodeAmount,
+          upi_id: nodeUpiId,
+          payment_status: nodeAmount > 0 ? 'pending' : 'completed'
+        });
+      } else {
+        tx.payment_amount = nodeAmount;
+        if (nodeUpiId) tx.upi_id = nodeUpiId;
+        await tx.save().catch(() => {});
+      }
       
       const payUrl = `${frontendUrl}/b/pay/upi/${tx?._id || 'unknown'}`;
       content = content || `Please complete your payment.`;
