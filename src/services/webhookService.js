@@ -685,7 +685,7 @@ export class WebhookService {
     let messageType = "text";
     let content = action.text || "";
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const frontendUrl = process.env.FRONTEND_URL || "https://yestickai.com";
 
     if (action.type === "book_meeting") {
       content = content || `Please choose a date and time for your meeting.`;
