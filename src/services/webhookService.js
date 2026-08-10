@@ -196,11 +196,31 @@ export class WebhookService {
       } else if (msg.interactive?.type === "list_reply") {
         content = msg.interactive.list_reply.title;
         interactiveReplyId = msg.interactive.list_reply.id;
+      } else if (msg.interactive?.type === "payment_status") {
+        content = `[Payment ${msg.interactive.payment_status?.status || "Completed"}]`;
+        const refId = msg.interactive.payment_status?.reference_id;
+        if (refId) {
+          const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+          await WorkflowTransaction.findByIdAndUpdate(refId, {
+            payment_status: "completed",
+            status: "completed"
+          }).catch(() => {});
+        }
       } else {
         content = "[Interactive]";
       }
     } else if (msg.type === "button") {
       content = msg.button?.text || "[Button]";
+    } else if (msg.type === "order" || msg.type === "payment") {
+      content = `[Payment Completed]`;
+      const refId = msg.order?.reference_id || msg.payment?.reference_id;
+      if (refId) {
+        const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+        await WorkflowTransaction.findByIdAndUpdate(refId, {
+          payment_status: "completed",
+          status: "completed"
+        }).catch(() => {});
+      }
     }
 
     const waAccount = await WhatsAppAccount.findOne({
@@ -779,23 +799,52 @@ export class WebhookService {
       const payUrl = `${frontendUrl}/b/pay/upi/${tx?._id || 'unknown'}`;
       content = content || `Please complete your payment.`;
       
+      const metaPaymentConfig = action.metaPaymentConfig || action.meta_payment_config || process.env.META_PAYMENT_CONFIG || "";
+
       messageType = "interactive";
-      requestBody = {
-        messaging_product: "whatsapp",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "cta_url",
-          body: { text: `${content}\n\nAmount: ₹${action.amount || 0}` },
-          action: {
-            name: "cta_url",
-            parameters: {
-              display_text: "Pay Now",
-              url: payUrl
+      if (metaPaymentConfig && (action.amount || 0) > 0) {
+        requestBody = {
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to,
+          type: "interactive",
+          interactive: {
+            type: "payment",
+            header: { type: "text", text: workflow.name || "Payment Invoice" },
+            body: { text: content },
+            action: {
+              name: "review_and_pay",
+              parameters: {
+                reference_id: tx._id.toString(),
+                type: "digital_goods",
+                payment_configuration: metaPaymentConfig,
+                currency: "INR",
+                total_amount: {
+                  value: Math.round((action.amount || 0) * 100),
+                  offset: 100
+                }
+              }
             }
           }
-        },
-      };
+        };
+      } else {
+        requestBody = {
+          messaging_product: "whatsapp",
+          to,
+          type: "interactive",
+          interactive: {
+            type: "cta_url",
+            body: { text: `${content}\n\nAmount: ₹${action.amount || 0}` },
+            action: {
+              name: "cta_url",
+              parameters: {
+                display_text: "Pay Now",
+                url: payUrl
+              }
+            }
+          },
+        };
+      }
     } else if (action.type === "send_buttons") {
       messageType = "interactive";
       requestBody = {
