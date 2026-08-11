@@ -606,6 +606,26 @@ export class WebhookService {
       }
 
       if (!action) {
+        const currentStep = workflow.actions?.find((a) => a.id === conversation.workflow_step_id);
+        if (currentStep && currentStep.type === "ask_question") {
+          const varName = currentStep.variableName || currentStep.variable_name || "user_answer";
+          conversation.variables = conversation.variables || {};
+          conversation.variables[varName] = text;
+          conversation.markModified("variables");
+
+          if (varName === "customer_name" || varName === "name") {
+            conversation.name = text;
+            const Contact = (await import("../models/Contact.js")).default;
+            await Contact.findByIdAndUpdate(contactId, { name: text }).catch(() => {});
+          }
+          await conversation.save().catch(() => {});
+
+          action = workflow.actions?.find((a) => a.id === currentStep.next_step);
+          isContinuation = Boolean(action);
+        }
+      }
+
+      if (!action) {
         action = this.findNextWorkflowAction(workflow, conversation.workflow_step_id, normalizedText, interactiveReplyId);
         isContinuation = Boolean(action);
       }
@@ -650,8 +670,8 @@ export class WebhookService {
       await Workflow.updateOne(
         { _id: workflow._id },
         {
-          $inc: { "analytics.conversion_count": 1 },
-          $set: { "analytics.last_triggered_at": new Date() },
+          $inc: { "analytics.execution_count": 1 },
+          $set: { "analytics.last_executed_at": new Date() },
         },
       ).catch(() => {});
     } else {
@@ -666,7 +686,7 @@ export class WebhookService {
 
     // Fast-forward through non-blocking nodes
     let loopCount = 0;
-    while (action && ["condition", "save_data", "delay"].includes(action.type)) {
+    while (action && ["condition", "save_data", "delay", "verify_payment"].includes(action.type)) {
       if (loopCount++ > 50) {
         console.error("Workflow fast-forward loop limit reached (infinite loop detected).");
         action = null;
@@ -683,7 +703,32 @@ export class WebhookService {
         } else {
           action = null;
         }
+      } else if (action.type === "verify_payment") {
+        // Send payment receipt / failure message to customer
+        await this.executeWorkflowAction(workflow, action, phoneNumberId, accessToken, conversation, convId, contactId);
+
+        const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+        const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+        const isPaid = tx && (tx.payment_status === "completed" || (tx.payment_amount || 0) === 0);
+
+        const nextId = isPaid ? (action.success_next_step || action.next_step) : action.failed_next_step;
+        if (nextId) {
+          action = workflow.actions?.find(a => a.id === nextId);
+        } else {
+          action = null;
+        }
       } else if (action.type === "save_data" || action.type === "delay") {
+        if (action.type === "save_data") {
+          const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+          const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+          if (tx) {
+            tx.payment_status = tx.payment_status || 'pending';
+            await tx.save().catch(() => {});
+          }
+          conversation.workflow_id = workflow._id;
+          conversation.markModified("variables");
+          await conversation.save().catch(() => {});
+        }
         // Automatically proceed to the next step
         if (action.next_step) {
           action = workflow.actions?.find(a => a.id === action.next_step);
@@ -893,6 +938,47 @@ export class WebhookService {
             })),
           },
         },
+      };
+    } else if (action.type === "ask_question") {
+      messageType = "text";
+      content = action.question || action.text || "Please enter your answer:";
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: content },
+      };
+    } else if (action.type === "verify_payment") {
+      const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+      const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+
+      const isPaid = tx && (tx.payment_status === "completed" || (tx.payment_amount || 0) === 0);
+      const customerName = conversation.variables?.customer_name || conversation.name || "Customer";
+      const orderId = tx?._id ? tx._id.toString().substring(0, 8).toUpperCase() : Math.floor(100000 + Math.random() * 900000);
+      const serviceName = tx?.service_name || workflow.name || "Service Booking";
+      const amount = tx?.payment_amount || 0;
+
+      let templateText = "";
+      if (isPaid) {
+        const defaultSuccess = `🎉 *PAYMENT CONFIRMED* 🎉\n\nThank you, *${customerName}*! 🙏\n\n🧾 *Order ID: #${orderId}*\n━━━━━━━━━━━━━━━━━━━\n📋 *Order Details*\n▫️ *${serviceName}* × 1 — ₹${amount}.00\n━━━━━━━━━━━━━━━━━━━\n🧮 Subtotal — ₹${amount}.00\n━━━━━━━━━━━━━━━━━━━\n💰 *TOTAL PAID — ₹${amount}.00*\n━━━━━━━━━━━━━━━━━━━\n\n📱 Save this confirmation for your records.\nThank you for doing business with us! ✨`;
+        templateText = action.successText || action.success_text || defaultSuccess;
+      } else {
+        const defaultFailed = `❌ *PAYMENT PENDING / FAILED*\n\nHello *${customerName}*, we could not verify your payment of ₹${amount}.00 for *${serviceName}*.\n\nOrder ID: #${orderId}\n\nPlease complete your payment or contact our team if you need assistance. 🙏`;
+        templateText = action.failedText || action.failed_text || defaultFailed;
+      }
+
+      templateText = templateText
+        .replace(/\{customer_name\}/g, customerName)
+        .replace(/\{order_id\}/g, orderId)
+        .replace(/\{service_name\}/g, serviceName)
+        .replace(/\{amount\}/g, amount);
+
+      messageType = "text";
+      requestBody = {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: templateText },
       };
     } else {
       requestBody = {

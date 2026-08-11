@@ -14,6 +14,7 @@ router.delete('/auto-replies/:id', requireAuth, requirePlan(['paid']), Automatio
 // Workflows
 router.get('/workflows', requireAuth, requirePlan(['paid']), AutomationController.getWorkflows);
 router.get('/workflows/analytics', requireAuth, requirePlan(['paid']), AutomationController.getWorkflowAnalytics);
+router.get('/workflows/:id/export', requireAuth, requirePlan(['paid']), AutomationController.exportWorkflowData);
 router.post('/workflows', requireAuth, requirePlan(['paid']), AutomationController.createWorkflow);
 router.put('/workflows/:id', requireAuth, requirePlan(['paid']), AutomationController.updateWorkflow);
 router.delete('/workflows/:id', requireAuth, requirePlan(['paid']), AutomationController.deleteWorkflow);

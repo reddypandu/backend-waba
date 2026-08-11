@@ -168,4 +168,97 @@ export class AutomationController {
       res.status(500).json({ error: err.message });
     }
   }
+
+  static async exportWorkflowData(req, res) {
+    try {
+      const { id } = req.params;
+      const workflow = await Workflow.findOne({ _id: id, user_id: req.user.id });
+      if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+
+      const BookingSlot = (await import('../models/BookingSlot.js')).BookingSlot;
+      const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
+      const Conversation = (await import('../models/Conversation.js')).default;
+
+      const slots = await BookingSlot.find({ workflow_id: id }).sort({ createdAt: -1 });
+      const transactions = await WorkflowTransaction.find({ workflow_id: id }).sort({ createdAt: -1 });
+
+      const rows = [];
+      const processedKeys = new Set();
+      const processedConvIds = new Set();
+
+      for (const slot of slots) {
+        if (slot.conversation_id) processedConvIds.add(slot.conversation_id.toString());
+        const tx = transactions.find(t => t.conversation_id?.toString() === slot.conversation_id?.toString() || t.phone_number === slot.phone_number);
+        const conv = slot.conversation_id ? await Conversation.findById(slot.conversation_id) : null;
+        const answersStr = conv?.variables ? Object.entries(conv.variables).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+
+        if (tx) processedKeys.add(tx._id.toString());
+        rows.push({
+          date: slot.date || '',
+          time: slot.time || '',
+          name: slot.customer_name || conv?.name || tx?.customer_name || 'Customer',
+          phone: slot.phone_number || tx?.phone_number || '',
+          answers: answersStr,
+          workflow: workflow.name,
+          amount: tx?.payment_amount || 0,
+          payment_status: tx?.payment_status || 'N/A',
+          booking_status: slot.status || 'booked',
+          created_at: slot.createdAt ? new Date(slot.createdAt).toISOString() : ''
+        });
+      }
+
+      for (const tx of transactions) {
+        if (tx.conversation_id) processedConvIds.add(tx.conversation_id.toString());
+        if (!processedKeys.has(tx._id.toString())) {
+          const conv = tx.conversation_id ? await Conversation.findById(tx.conversation_id) : null;
+          const answersStr = conv?.variables ? Object.entries(conv.variables).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+          rows.push({
+            date: '',
+            time: '',
+            name: tx.customer_name || conv?.name || 'Customer',
+            phone: tx.phone_number || '',
+            answers: answersStr,
+            workflow: workflow.name,
+            amount: tx.payment_amount || 0,
+            payment_status: tx.payment_status || 'pending',
+            booking_status: 'N/A',
+            created_at: tx.createdAt ? new Date(tx.createdAt).toISOString() : ''
+          });
+        }
+      }
+
+      const conversations = await Conversation.find({ user_id: req.user.id, workflow_id: id }).sort({ updatedAt: -1 });
+      for (const conv of conversations) {
+        if (!processedConvIds.has(conv._id.toString())) {
+          const answersStr = conv?.variables ? Object.entries(conv.variables).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+          rows.push({
+            date: '',
+            time: '',
+            name: conv.name || 'Customer',
+            phone: conv.phone_number || '',
+            answers: answersStr,
+            workflow: workflow.name,
+            amount: 0,
+            payment_status: 'N/A',
+            booking_status: 'completed',
+            created_at: conv.updatedAt ? new Date(conv.updatedAt).toISOString() : ''
+          });
+        }
+      }
+
+      let csv = 'Date,Time,Customer Name,Phone Number,Collected Q&A Responses,Workflow Name,Amount (INR),Payment Status,Booking Status,Created At\n';
+      for (const r of rows) {
+        const sanitize = (val) => `"${String(val || '').replace(/"/g, '""')}"`;
+        csv += `${sanitize(r.date)},${sanitize(r.time)},${sanitize(r.name)},${sanitize(r.phone)},${sanitize(r.answers)},${sanitize(r.workflow)},${sanitize(r.amount)},${sanitize(r.payment_status)},${sanitize(r.booking_status)},${sanitize(r.created_at)}\n`;
+      }
+
+      const filename = `${workflow.name.replace(/[^a-z0-9]/gi, '_')}_data.csv`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.status(200).send('\uFEFF' + csv);
+    } catch (err) {
+      console.error('Error exporting workflow data:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
 }
