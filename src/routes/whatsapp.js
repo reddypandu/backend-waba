@@ -561,24 +561,29 @@ router.get("/conversations", requireAuth, async (req, res) => {
 
     if (search) {
       const searchRegex = new RegExp(search, "i");
-      
       const matchingContacts = await Contact.find({
         user_id: req.user.id,
-        $or: [
-          { name: searchRegex },
-          { phone_number: searchRegex }
-        ]
+        $or: [{ name: searchRegex }, { phone_number: searchRegex }]
       }, '_id');
-      
       const contactIds = matchingContacts.map(c => c._id);
 
-      query = {
+      query.$or = [
+        { phone_number: searchRegex },
+        { contact_id: { $in: contactIds } }
+      ];
+    }
+
+    if (req.query.campaign_id && req.query.campaign_id !== "all") {
+      const Message = (await import("../models/Message.js")).default;
+      const legacyIds = [
+        req.query.campaign_id,
+        ...(mongoose.Types.ObjectId.isValid(req.query.campaign_id) ? [new mongoose.Types.ObjectId(req.query.campaign_id)] : [])
+      ];
+      const campaignConvIds = await Message.distinct("conversation_id", {
         user_id: req.user.id,
-        $or: [
-          { phone_number: searchRegex },
-          { contact_id: { $in: contactIds } }
-        ]
-      };
+        campaign_id: { $in: legacyIds }
+      });
+      query._id = { $in: campaignConvIds };
     }
 
     const [convs, total] = await Promise.all([
