@@ -83,45 +83,51 @@ export class WebhookService {
         if (change.field === "payment_status_update" || change.field === "payments" || change.field === "orders" || value?.payment || value?.payment_status) {
           const pStatus = value.payment_status || value.status || value.payment?.status || "completed";
           const refId = value.reference_id || value.payment?.reference_id || value.order?.reference_id || value.id;
-          const rawRecipient = value.recipient_id || value.from || value.contacts?.[0]?.wa_id || "";
-          const recipientPhone = normalizePhone(rawRecipient);
-
-          console.log(`[Webhook Payment Event] Field: ${change.field}, Status: ${pStatus}, Ref: ${refId}, Phone: ${recipientPhone}`);
 
           const isSuccess = ["captured", "completed", "paid", "success"].includes(String(pStatus).toLowerCase());
           const isFailed = ["failed", "canceled", "declined"].includes(String(pStatus).toLowerCase());
           const newStatus = isSuccess ? "completed" : isFailed ? "failed" : "pending";
 
-          const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
           let tx = null;
           if (refId && mongoose.Types.ObjectId.isValid(refId)) {
-            tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: newStatus, status: newStatus }, { new: true });
+            tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: newStatus, status: newStatus }, { returnDocument: "after" });
           }
+
+          let rawRecipient = tx?.phone_number || value.from || value.contacts?.[0]?.wa_id || value.recipient_id || "";
+          let recipientPhone = normalizePhone(rawRecipient);
+
           if (!tx && recipientPhone) {
             const last10 = recipientPhone.slice(-10);
             tx = await WorkflowTransaction.findOneAndUpdate(
               { phone_number: { $regex: last10 + "$" }, payment_status: "pending" },
               { payment_status: newStatus, status: newStatus },
-              { sort: { createdAt: -1 }, new: true }
+              { sort: { createdAt: -1 }, returnDocument: "after" }
             );
+            if (tx?.phone_number) recipientPhone = normalizePhone(tx.phone_number);
           }
 
+          console.log(`[Webhook Payment Event] Field: ${change.field}, Status: ${pStatus}, Ref: ${refId}, Customer Phone: ${recipientPhone}`);
+
           if (recipientPhone) {
-            const Conversation = (await import("../models/Conversation.js")).default;
             const last10 = recipientPhone.slice(-10);
-            const conv = await Conversation.findOne({
-              phone_number: { $regex: last10 + "$" },
-              workflow_id: { $ne: null }
-            }).sort({ updatedAt: -1 });
+            let conv = null;
+            if (tx?.conversation_id) {
+              conv = await Conversation.findById(tx.conversation_id);
+            }
+            if (!conv) {
+              conv = await Conversation.findOne({
+                phone_number: { $regex: last10 + "$" },
+                workflow_id: { $ne: null }
+              }).sort({ updatedAt: -1 });
+            }
 
             if (conv) {
               const waAcc = await WhatsAppAccount.findOne({
                 $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }],
               }).sort({ updatedAt: -1 });
-              const Contact = (await import("../models/Contact.js")).default;
               const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: { $regex: last10 + "$" } });
 
-              // Record in Inbox so payment status displays in YesTick Inbox!
+              // Record in Inbox so payment status displays in YesTick Inbox for the customer!
               const paymentMsgText = isSuccess ? `💳 Payment Received: ₹${tx?.payment_amount || 1}.00` : `❌ Payment Failed`;
               await Message.create({
                 user_id: conv.user_id,
@@ -132,7 +138,7 @@ export class WebhookService {
                 content: paymentMsgText,
                 phone_number: recipientPhone,
                 status: "delivered",
-              }).catch(() => {});
+              }).catch((err) => console.error('[Webhook Message Create Error]', err));
 
               conv.last_message = paymentMsgText;
               conv.last_message_at = new Date();
