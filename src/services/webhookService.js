@@ -767,8 +767,15 @@ export class WebhookService {
         await this.executeWorkflowAction(workflow, action, phoneNumberId, accessToken, conversation, convId, contactId);
 
         const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
-        const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
-        const isPaid = tx && (tx.payment_status === "completed" || (tx.payment_amount || 0) === 0);
+        const last10 = conversation.phone_number ? conversation.phone_number.slice(-10) : "";
+        let tx = await WorkflowTransaction.findOne({
+          $or: [
+            { workflow_id: workflow._id, conversation_id: convId },
+            { phone_number: { $regex: last10 + "$" } }
+          ]
+        }).sort({ createdAt: -1 });
+
+        const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed" || (tx.payment_amount || 0) === 0));
 
         const nextId = isPaid ? (action.success_next_step || action.next_step) : action.failed_next_step;
         if (nextId) {
@@ -1009,9 +1016,15 @@ export class WebhookService {
       };
     } else if (action.type === "verify_payment") {
       const WorkflowTransaction = (await import('../models/WorkflowTransaction.js')).WorkflowTransaction;
-      const tx = await WorkflowTransaction.findOne({ workflow_id: workflow._id, conversation_id: convId }).sort({ createdAt: -1 });
+      const last10 = conversation.phone_number ? conversation.phone_number.slice(-10) : "";
+      let tx = await WorkflowTransaction.findOne({
+        $or: [
+          { workflow_id: workflow._id, conversation_id: convId },
+          { phone_number: { $regex: last10 + "$" } }
+        ]
+      }).sort({ createdAt: -1 });
 
-      const isPaid = tx && (tx.payment_status === "completed" || (tx.payment_amount || 0) === 0);
+      const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed" || (tx.payment_amount || 0) === 0));
       const customerName = conversation.variables?.customer_name || conversation.name || "Customer";
       const orderId = tx?._id ? tx._id.toString().substring(0, 8).toUpperCase() : Math.floor(100000 + Math.random() * 900000);
       const serviceName = tx?.service_name || workflow.name || "Service Booking";
