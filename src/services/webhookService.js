@@ -323,50 +323,51 @@ export class WebhookService {
       } else if (msg.interactive?.type === "list_reply") {
         content = msg.interactive.list_reply.title;
         interactiveReplyId = msg.interactive.list_reply.id;
-      } else if (msg.interactive?.type === "payment_status") {
-        content = `💳 Payment Received: ₹1.00`;
-        const refId = msg.interactive.payment_status?.reference_id;
-        const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+      } else if (msg.interactive?.type === "payment_status" || msg.interactive?.type === "nfm_reply") {
+        const refId = msg.interactive?.payment_status?.reference_id || msg.interactive?.nfm_reply?.response_json?.reference_id;
         let tx = null;
         if (refId && mongoose.Types.ObjectId.isValid(refId)) {
-          tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { new: true });
+          tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { returnDocument: "after" });
         }
         if (!tx && normalizedPhone) {
           const last10 = normalizedPhone.slice(-10);
           tx = await WorkflowTransaction.findOneAndUpdate(
             { phone_number: { $regex: last10 + "$" } },
             { payment_status: "completed", status: "completed" },
-            { sort: { createdAt: -1 }, new: true }
+            { sort: { createdAt: -1 }, returnDocument: "after" }
           );
         }
+        const paidAmount = tx?.payment_amount != null ? tx.payment_amount : 1;
+        content = `💳 Payment Received: ₹${paidAmount}.00`;
       } else {
         content = "[Interactive]";
       }
     } else if (msg.type === "button") {
       content = msg.button?.text || "[Button]";
     } else if (msg.type === "order" || msg.type === "payment") {
-      content = `💳 Payment Received: ₹1.00`;
       const refId = msg.order?.reference_id || msg.payment?.reference_id;
-      const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
-      
       let tx = null;
       if (refId && mongoose.Types.ObjectId.isValid(refId)) {
-        tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { new: true });
+        tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { returnDocument: "after" });
       }
       if (!tx && normalizedPhone) {
+        const last10 = normalizedPhone.slice(-10);
         tx = await WorkflowTransaction.findOneAndUpdate(
-          { phone_number: normalizedPhone, payment_status: "pending" },
+          { phone_number: { $regex: last10 + "$" }, payment_status: "pending" },
           { payment_status: "completed", status: "completed" },
-          { sort: { createdAt: -1 }, new: true }
+          { sort: { createdAt: -1 }, returnDocument: "after" }
         );
       }
       if (!tx && normalizedPhone) {
+        const last10 = normalizedPhone.slice(-10);
         tx = await WorkflowTransaction.findOneAndUpdate(
-          { phone_number: normalizedPhone },
+          { phone_number: { $regex: last10 + "$" } },
           { payment_status: "completed", status: "completed" },
-          { sort: { createdAt: -1 }, new: true }
+          { sort: { createdAt: -1 }, returnDocument: "after" }
         );
       }
+      const paidAmount = tx?.payment_amount != null ? tx.payment_amount : (msg.order?.order_amount || msg.payment?.amount || 1);
+      content = `💳 Payment Received: ₹${paidAmount}.00`;
     }
 
     const waAccount = await WhatsAppAccount.findOne({
@@ -767,8 +768,8 @@ export class WebhookService {
 
           action = workflow.actions?.find((a) => a.id === currentStep.next_step);
           isContinuation = Boolean(action);
-        } else if (currentStep && currentStep.type === "payment_invoice") {
-          action = workflow.actions?.find((a) => a.id === currentStep.next_step);
+        } else if (currentStep && (currentStep.type === "payment_invoice" || currentStep.type === "verify_payment")) {
+          action = currentStep.type === "verify_payment" ? currentStep : workflow.actions?.find((a) => a.id === currentStep.next_step);
           isContinuation = Boolean(action);
         }
       }
@@ -886,6 +887,7 @@ export class WebhookService {
             await tx.save().catch(() => {});
           }
           conversation.workflow_id = workflow._id;
+          conversation.workflow_step_id = action.id;
           conversation.markModified("variables");
           await conversation.save().catch(() => {});
         }
@@ -893,6 +895,9 @@ export class WebhookService {
         if (action.next_step) {
           action = workflow.actions?.find(a => a.id === action.next_step);
         } else {
+          conversation.workflow_id = null;
+          conversation.workflow_step_id = null;
+          await conversation.save().catch(() => {});
           action = null;
         }
       }
