@@ -145,6 +145,46 @@ export class WebhookService {
               }
             }
 
+            // Check if status is a payment status update!
+            const isPaymentUpdate = s.payment || s.payment_status || s.status === 'captured' || s.status === 'completed' || s.status === 'paid';
+            if (isPaymentUpdate) {
+              const refId = s.payment?.reference_id || s.payment_status?.reference_id || s.id;
+              const recipientPhone = normalizePhone(s.recipient_id || value.contacts?.[0]?.wa_id || "");
+              console.log(`[Webhook Payment Status] Received payment update for ref: ${refId}, phone: ${recipientPhone}`);
+
+              const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+              let tx = null;
+              if (refId && mongoose.Types.ObjectId.isValid(refId)) {
+                tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: 'completed', status: 'completed' }, { new: true });
+              }
+              if (!tx && recipientPhone) {
+                tx = await WorkflowTransaction.findOneAndUpdate(
+                  { phone_number: recipientPhone, payment_status: 'pending' },
+                  { payment_status: 'completed', status: 'completed' },
+                  { sort: { createdAt: -1 }, new: true }
+                );
+              }
+
+              if (recipientPhone) {
+                const Conversation = (await import("../models/Conversation.js")).default;
+                const conv = await Conversation.findOne({ phone_number: recipientPhone, workflow_id: { $ne: null } });
+                if (conv) {
+                  const Contact = (await import("../models/Contact.js")).default;
+                  const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: recipientPhone });
+                  await this.checkWorkflow(
+                    conv.user_id,
+                    conv,
+                    "[Payment Completed]",
+                    null,
+                    phoneNumberId,
+                    wabaId,
+                    conv._id,
+                    contact?._id
+                  ).catch(console.error);
+                }
+              }
+            }
+
             // Automated Follow-up Logic (from sample app)
             if (
               updatedMsg &&
@@ -179,6 +219,7 @@ export class WebhookService {
   static async processMessage(msg, value, phoneNumberId, wabaId) {
     const from = msg.from;
     const contactName = value.contacts?.[0]?.profile?.name || from;
+    const normalizedPhone = normalizePhone(from);
 
     let content = null,
       messageType = msg.type;
@@ -199,7 +240,7 @@ export class WebhookService {
       } else if (msg.interactive?.type === "payment_status") {
         content = `[Payment ${msg.interactive.payment_status?.status || "Completed"}]`;
         const refId = msg.interactive.payment_status?.reference_id;
-        if (refId) {
+        if (refId && mongoose.Types.ObjectId.isValid(refId)) {
           const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
           await WorkflowTransaction.findByIdAndUpdate(refId, {
             payment_status: "completed",
@@ -214,12 +255,25 @@ export class WebhookService {
     } else if (msg.type === "order" || msg.type === "payment") {
       content = `[Payment Completed]`;
       const refId = msg.order?.reference_id || msg.payment?.reference_id;
-      if (refId) {
-        const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
-        await WorkflowTransaction.findByIdAndUpdate(refId, {
-          payment_status: "completed",
-          status: "completed"
-        }).catch(() => {});
+      const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+      
+      let tx = null;
+      if (refId && mongoose.Types.ObjectId.isValid(refId)) {
+        tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { new: true });
+      }
+      if (!tx && normalizedPhone) {
+        tx = await WorkflowTransaction.findOneAndUpdate(
+          { phone_number: normalizedPhone, payment_status: "pending" },
+          { payment_status: "completed", status: "completed" },
+          { sort: { createdAt: -1 }, new: true }
+        );
+      }
+      if (!tx && normalizedPhone) {
+        tx = await WorkflowTransaction.findOneAndUpdate(
+          { phone_number: normalizedPhone },
+          { payment_status: "completed", status: "completed" },
+          { sort: { createdAt: -1 }, new: true }
+        );
       }
     }
 
@@ -234,7 +288,6 @@ export class WebhookService {
       return;
     }
     const userId = waAccount.user_id;
-    const normalizedPhone = normalizePhone(from);
 
     const contact = await Contact.findOneAndUpdate(
       { user_id: userId, phone_number: normalizedPhone },
@@ -1071,7 +1124,9 @@ export class WebhookService {
 
     const nextStepExists = Boolean(
       (action.type === "send_buttons" && action.buttons?.some((button) => button.next_step)) ||
-      action.next_step,
+      action.next_step ||
+      action.success_next_step ||
+      action.failed_next_step,
     );
 
     if (nextStepExists) {
