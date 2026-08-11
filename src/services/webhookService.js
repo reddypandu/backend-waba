@@ -819,25 +819,38 @@ export class WebhookService {
 
       messageType = "interactive";
       if (metaPaymentConfig && (action.amount || 0) > 0) {
+        const paise = Math.round((action.amount || 0) * 100);
         requestBody = {
           messaging_product: "whatsapp",
           recipient_type: "individual",
           to,
           type: "interactive",
           interactive: {
-            type: "payment",
+            type: "order_details",
             header: { type: "text", text: workflow.name || "Payment Invoice" },
             body: { text: content },
             action: {
               name: "review_and_pay",
               parameters: {
                 reference_id: tx._id.toString(),
-                type: "digital_goods",
+                type: "digital-goods",
+                payment_type: "upi",
                 payment_configuration: metaPaymentConfig,
                 currency: "INR",
                 total_amount: {
-                  value: Math.round((action.amount || 0) * 100),
+                  value: paise,
                   offset: 100
+                },
+                order: {
+                  status: "pending",
+                  items: [
+                    {
+                      name: workflow.name || "Service Booking",
+                      amount: { value: paise, offset: 100 },
+                      quantity: 1
+                    }
+                  ],
+                  subtotal: { value: paise, offset: 100 }
                 }
               }
             }
