@@ -11,6 +11,7 @@ import Message from "../models/Message.js";
 import Upload from "../models/Upload.js";
 import Conversation from "../models/Conversation.js";
 import { AutoReply, Workflow } from "../models/Automation.js";
+import { WorkflowTransaction } from "../models/WorkflowTransaction.js";
 import WalletTransaction from "../models/WalletTransaction.js";
 import Design from "../models/Design.js";
 import { cloudinary } from "../services/cloudinary.js";
@@ -102,9 +103,19 @@ router.get("/me", requireAuth, async (req, res) => {
       Campaign.countDocuments(legacyUserIdFilter(userId)),
       Template.countDocuments(legacyUserIdFilter(userId)),
     ]);
-    const transactions = await WalletTransaction.find({ user_id: userId })
-      .sort({ createdAt: -1 })
-      .limit(20);
+    const [walletTxs, workflowTxs] = await Promise.all([
+      WalletTransaction.find({ user_id: userId }).sort({ createdAt: -1 }).limit(20).lean(),
+      WorkflowTransaction.find({ user_id: userId }).sort({ createdAt: -1 }).limit(20).lean(),
+    ]);
+
+    const transactions = [...walletTxs, ...workflowTxs.map(t => ({
+      ...t,
+      amount: t.payment_amount ? t.payment_amount * 100 : 0,
+      description: `Payment for ${t.service_name || 'Workflow Booking'}`,
+      status: t.payment_status || t.status || 'completed'
+    }))]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 20);
 
     // ENHANCEMENT: Auto-detect messaging activity for existing accounts
     let dashboardStatus = null;

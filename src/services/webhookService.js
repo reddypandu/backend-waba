@@ -120,18 +120,19 @@ export class WebhookService {
               const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: { $regex: last10 + "$" } });
 
               // Record in Inbox so payment status displays in YesTick Inbox!
+              const paymentMsgText = isSuccess ? `💳 Payment Received: ₹${tx?.payment_amount || 1}.00` : `❌ Payment Failed`;
               await Message.create({
                 user_id: conv.user_id,
                 conversation_id: conv._id,
                 contact_id: contact?._id,
                 direction: "inbound",
                 message_type: "text",
-                content: `[Payment ${isSuccess ? "Completed" : "Status Update"}]`,
+                content: paymentMsgText,
                 phone_number: recipientPhone,
                 status: "delivered",
               }).catch(() => {});
 
-              conv.last_message = `[Payment ${isSuccess ? "Completed" : "Failed"}]`;
+              conv.last_message = paymentMsgText;
               conv.last_message_at = new Date();
               await conv.save().catch(() => {});
 
@@ -315,7 +316,7 @@ export class WebhookService {
         content = msg.interactive.list_reply.title;
         interactiveReplyId = msg.interactive.list_reply.id;
       } else if (msg.interactive?.type === "payment_status") {
-        content = `[Payment ${msg.interactive.payment_status?.status || "Completed"}]`;
+        content = `💳 Payment Received: ₹1.00`;
         const refId = msg.interactive.payment_status?.reference_id;
         if (refId && mongoose.Types.ObjectId.isValid(refId)) {
           const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
@@ -330,7 +331,7 @@ export class WebhookService {
     } else if (msg.type === "button") {
       content = msg.button?.text || "[Button]";
     } else if (msg.type === "order" || msg.type === "payment") {
-      content = `[Payment Completed]`;
+      content = `💳 Payment Received: ₹1.00`;
       const refId = msg.order?.reference_id || msg.payment?.reference_id;
       const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
       
@@ -837,9 +838,6 @@ export class WebhookService {
           action = null;
         }
       } else if (action.type === "verify_payment") {
-        // Send payment receipt / failure message to customer
-        await this.executeWorkflowAction(workflow, action, phoneNumberId, accessToken, conversation, convId, contactId);
-
         const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
         const last10 = conversation.phone_number ? conversation.phone_number.slice(-10) : "";
         let tx = await WorkflowTransaction.findOne({
@@ -849,13 +847,20 @@ export class WebhookService {
           ]
         }).sort({ createdAt: -1 });
 
-        const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed" || (tx.payment_amount || 0) === 0));
+        const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
 
-        const nextId = isPaid ? (action.success_next_step || action.next_step) : action.failed_next_step;
-        if (nextId) {
-          action = workflow.actions?.find(a => a.id === nextId);
+        if (isPaid) {
+          // Send payment receipt confirmation message to customer
+          await this.executeWorkflowAction(workflow, action, phoneNumberId, accessToken, conversation, convId, contactId);
+          const nextId = action.success_next_step || action.next_step;
+          action = nextId ? workflow.actions?.find(a => a.id === nextId) : null;
         } else {
+          // Customer hasn't paid yet! Pause workflow at verify_payment step until payment webhook arrives
+          conversation.workflow_id = workflow._id;
+          conversation.workflow_step_id = action.id;
+          await conversation.save().catch(() => {});
           action = null;
+          break;
         }
       } else if (action.type === "save_data" || action.type === "delay") {
         if (action.type === "save_data") {
@@ -1098,7 +1103,7 @@ export class WebhookService {
         ]
       }).sort({ createdAt: -1 });
 
-      const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed" || (tx.payment_amount || 0) === 0));
+      const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
       const customerName = conversation.variables?.customer_name || conversation.name || "Customer";
       const orderId = tx?._id ? tx._id.toString().substring(0, 8).toUpperCase() : Math.floor(100000 + Math.random() * 900000);
       const serviceName = tx?.service_name || workflow.name || "Service Booking";
