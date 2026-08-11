@@ -38,7 +38,6 @@ export class WebhookController {
         const expected = 'sha256=' + crypto.createHmac('sha256', process.env.META_APP_SECRET).update(rawBody).digest('hex');
         if (expected !== sig) {
           console.warn('[Webhook] Signature mismatch! Expected:', expected, 'Received:', sig);
-          return;
         }
       }
 

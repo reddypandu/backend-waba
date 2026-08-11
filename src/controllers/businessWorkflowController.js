@@ -4,6 +4,7 @@ import { Workflow } from '../models/Automation.js';
 import Conversation from '../models/Conversation.js';
 import Contact from '../models/Contact.js';
 import WhatsAppAccount from '../models/WhatsAppAccount.js';
+import Message from '../models/Message.js';
 import { WebhookService } from '../services/webhookService.js';
 
 export class BusinessWorkflowController {
@@ -169,7 +170,7 @@ export class BusinessWorkflowController {
 
       const transaction = await WorkflowTransaction.findByIdAndUpdate(
         transactionId,
-        { payment_status: 'completed', transaction_id: paymentId },
+        { payment_status: 'completed', status: 'completed', transaction_id: paymentId },
         { new: true }
       );
 
@@ -178,33 +179,41 @@ export class BusinessWorkflowController {
       const workflow = await Workflow.findById(transaction.workflow_id);
       const conversation = await Conversation.findById(transaction.conversation_id);
       
-      // Find the payment_invoice action to get its next step
-      const paymentAction = workflow.actions.find(a => a.type === 'payment_invoice');
-      if (paymentAction && paymentAction.next_step) {
-        let nextAction = workflow.actions.find(a => a.id === paymentAction.next_step);
-        
-        // Skip save_data node and go to the next one if present
-        if (nextAction && nextAction.type === 'save_data') {
-           await WorkflowTransaction.findByIdAndUpdate(transactionId, { status: 'completed' });
-           if (nextAction.next_step) {
-             nextAction = workflow.actions.find(a => a.id === nextAction.next_step);
-           } else {
-             nextAction = null;
-           }
-        }
-        
-        if (nextAction) {
-          const waAccount = await WhatsAppAccount.findOne({ user_id: workflow.user_id });
-          await WebhookService.executeWorkflowAction(
-            workflow,
-            nextAction,
-            waAccount.phone_number_id,
-            waAccount.access_token,
-            conversation,
-            conversation._id,
-            conversation.contact_id
-          );
-        }
+      if (conversation && workflow) {
+        const last10 = transaction.phone_number ? transaction.phone_number.slice(-10) : "";
+        const contact = await Contact.findOne({ user_id: workflow.user_id, phone_number: { $regex: last10 + "$" } });
+        const waAccount = await WhatsAppAccount.findOne({ user_id: workflow.user_id }).sort({ updatedAt: -1 });
+
+        const paidAmount = transaction.payment_amount != null ? transaction.payment_amount : 1;
+        const paymentMsgText = `💳 Payment Received: ₹${paidAmount}.00`;
+
+        // 1. Record inbound message in Inbox
+        await Message.create({
+          user_id: workflow.user_id,
+          conversation_id: conversation._id,
+          contact_id: contact?._id,
+          direction: "inbound",
+          message_type: "text",
+          content: paymentMsgText,
+          phone_number: transaction.phone_number,
+          status: "delivered",
+        }).catch(() => {});
+
+        conversation.last_message = paymentMsgText;
+        conversation.last_message_at = new Date();
+        await conversation.save().catch(() => {});
+
+        // 2. Invoke checkWorkflow to evaluate Verify Payment -> Save Data -> complete workflow
+        await WebhookService.checkWorkflow(
+          workflow.user_id,
+          conversation,
+          "[Payment Completed]",
+          null,
+          waAccount?.phone_number_id,
+          waAccount?.access_token || process.env.WA_TOKEN,
+          conversation._id,
+          contact?._id
+        ).catch(console.error);
       }
 
       res.json({ success: true, transaction });

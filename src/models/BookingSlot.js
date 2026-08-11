@@ -11,6 +11,7 @@ const BookingSlotSchema = new mongoose.Schema({
   status: { type: String, enum: ['available', 'booked', 'blocked'], default: 'available' },
   
   booked_by_contact_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact' },
+  conversation_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation' },
   booked_by_name: { type: String },
   booked_by_phone: { type: String },
 }, { timestamps: true });

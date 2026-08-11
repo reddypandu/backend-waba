@@ -188,19 +188,33 @@ export class AutomationController {
 
       for (const slot of slots) {
         if (slot.conversation_id) processedConvIds.add(slot.conversation_id.toString());
-        const tx = transactions.find(t => t.conversation_id?.toString() === slot.conversation_id?.toString() || t.phone_number === slot.phone_number);
-        const conv = slot.conversation_id ? await Conversation.findById(slot.conversation_id) : null;
+        const slotPhone = slot.booked_by_phone || slot.phone_number || '';
+        const slotLast10 = slotPhone ? slotPhone.slice(-10) : '';
+
+        const tx = transactions.find(t => {
+          if (t.conversation_id && slot.conversation_id && t.conversation_id.toString() === slot.conversation_id.toString()) return true;
+          if (t.meeting_id && t.meeting_id === slot._id.toString()) return true;
+          if (slotLast10 && t.phone_number && t.phone_number.slice(-10) === slotLast10) return true;
+          return false;
+        });
+
+        const conv = (slot.conversation_id ? await Conversation.findById(slot.conversation_id) : null) ||
+                     (slotLast10 ? await Conversation.findOne({ phone_number: { $regex: slotLast10 + "$" } }) : null) ||
+                     (tx?.conversation_id ? await Conversation.findById(tx.conversation_id) : null);
+
         const answersStr = conv?.variables ? Object.entries(conv.variables).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+        const name = slot.booked_by_name || slot.customer_name || tx?.customer_name || conv?.name || 'Customer';
+        const phone = slot.booked_by_phone || slot.phone_number || tx?.phone_number || conv?.phone_number || '';
 
         if (tx) processedKeys.add(tx._id.toString());
         rows.push({
           date: slot.date || '',
           time: slot.time || '',
-          name: slot.customer_name || conv?.name || tx?.customer_name || 'Customer',
-          phone: slot.phone_number || tx?.phone_number || '',
+          name,
+          phone,
           answers: answersStr,
           workflow: workflow.name,
-          amount: tx?.payment_amount || 0,
+          amount: tx?.payment_amount != null ? tx.payment_amount : 'N/A',
           payment_status: tx?.payment_status || 'N/A',
           booking_status: slot.status || 'booked',
           created_at: slot.createdAt ? new Date(slot.createdAt).toISOString() : ''
@@ -210,16 +224,20 @@ export class AutomationController {
       for (const tx of transactions) {
         if (tx.conversation_id) processedConvIds.add(tx.conversation_id.toString());
         if (!processedKeys.has(tx._id.toString())) {
-          const conv = tx.conversation_id ? await Conversation.findById(tx.conversation_id) : null;
+          const txLast10 = tx.phone_number ? tx.phone_number.slice(-10) : '';
+          const conv = (tx.conversation_id ? await Conversation.findById(tx.conversation_id) : null) ||
+                       (txLast10 ? await Conversation.findOne({ phone_number: { $regex: txLast10 + "$" } }) : null);
           const answersStr = conv?.variables ? Object.entries(conv.variables).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+          const formattedDate = tx.meeting_date ? new Date(tx.meeting_date).toISOString().split('T')[0] : '';
+
           rows.push({
-            date: '',
-            time: '',
+            date: formattedDate,
+            time: tx.meeting_time || '',
             name: tx.customer_name || conv?.name || 'Customer',
             phone: tx.phone_number || '',
             answers: answersStr,
             workflow: workflow.name,
-            amount: tx.payment_amount || 0,
+            amount: tx.payment_amount != null ? tx.payment_amount : 0,
             payment_status: tx.payment_status || 'pending',
             booking_status: 'N/A',
             created_at: tx.createdAt ? new Date(tx.createdAt).toISOString() : ''

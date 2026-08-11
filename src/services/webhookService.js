@@ -232,31 +232,61 @@ export class WebhookService {
             const isPaymentUpdate = s.payment || s.payment_status || s.status === 'captured' || s.status === 'completed' || s.status === 'paid';
             if (isPaymentUpdate) {
               const refId = s.payment?.reference_id || s.payment_status?.reference_id || s.id;
-              const recipientPhone = normalizePhone(s.recipient_id || value.contacts?.[0]?.wa_id || "");
-              console.log(`[Webhook Payment Status] Received payment update for ref: ${refId}, phone: ${recipientPhone}`);
-
-              const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
               let tx = null;
               if (refId && mongoose.Types.ObjectId.isValid(refId)) {
-                tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: 'completed', status: 'completed' }, { new: true });
+                tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: 'completed', status: 'completed' }, { returnDocument: 'after' });
               }
+
+              let rawRecipient = tx?.phone_number || s.recipient_id || value.contacts?.[0]?.wa_id || "";
+              let recipientPhone = normalizePhone(rawRecipient);
+
               if (!tx && recipientPhone) {
+                const last10 = recipientPhone.slice(-10);
                 tx = await WorkflowTransaction.findOneAndUpdate(
-                  { phone_number: recipientPhone, payment_status: 'pending' },
+                  { phone_number: { $regex: last10 + "$" }, payment_status: 'pending' },
                   { payment_status: 'completed', status: 'completed' },
-                  { sort: { createdAt: -1 }, new: true }
+                  { sort: { createdAt: -1 }, returnDocument: 'after' }
                 );
+                if (tx?.phone_number) recipientPhone = normalizePhone(tx.phone_number);
               }
 
               if (recipientPhone) {
-                const Conversation = (await import("../models/Conversation.js")).default;
-                const conv = await Conversation.findOne({ phone_number: recipientPhone, workflow_id: { $ne: null } });
+                const last10 = recipientPhone.slice(-10);
+                let conv = null;
+                if (tx?.conversation_id) {
+                  conv = await Conversation.findById(tx.conversation_id);
+                }
+                if (!conv) {
+                  conv = await Conversation.findOne({
+                    phone_number: { $regex: last10 + "$" },
+                    workflow_id: { $ne: null }
+                  }).sort({ updatedAt: -1 });
+                }
+
                 if (conv) {
                   const waAcc = await WhatsAppAccount.findOne({
                     $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }],
                   }).sort({ updatedAt: -1 });
-                  const Contact = (await import("../models/Contact.js")).default;
-                  const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: recipientPhone });
+                  const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: { $regex: last10 + "$" } });
+
+                  const paidAmount = tx?.payment_amount != null ? tx.payment_amount : 1;
+                  const paymentMsgText = `💳 Payment Received: ₹${paidAmount}.00`;
+                  
+                  await Message.create({
+                    user_id: conv.user_id,
+                    conversation_id: conv._id,
+                    contact_id: contact?._id,
+                    direction: "inbound",
+                    message_type: "text",
+                    content: paymentMsgText,
+                    phone_number: recipientPhone,
+                    status: "delivered",
+                  }).catch(() => {});
+
+                  conv.last_message = paymentMsgText;
+                  conv.last_message_at = new Date();
+                  await conv.save().catch(() => {});
+
                   await this.checkWorkflow(
                     conv.user_id,
                     conv,
@@ -324,7 +354,11 @@ export class WebhookService {
         content = msg.interactive.list_reply.title;
         interactiveReplyId = msg.interactive.list_reply.id;
       } else if (msg.interactive?.type === "payment_status" || msg.interactive?.type === "nfm_reply") {
-        const refId = msg.interactive?.payment_status?.reference_id || msg.interactive?.nfm_reply?.response_json?.reference_id;
+        let responseJson = msg.interactive?.nfm_reply?.response_json;
+        if (typeof responseJson === "string") {
+          try { responseJson = JSON.parse(responseJson); } catch (e) {}
+        }
+        const refId = msg.interactive?.payment_status?.reference_id || responseJson?.reference_id || responseJson?.order_id;
         let tx = null;
         if (refId && mongoose.Types.ObjectId.isValid(refId)) {
           tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { returnDocument: "after" });
@@ -337,7 +371,7 @@ export class WebhookService {
             { sort: { createdAt: -1 }, returnDocument: "after" }
           );
         }
-        const paidAmount = tx?.payment_amount != null ? tx.payment_amount : 1;
+        const paidAmount = tx?.payment_amount != null ? tx.payment_amount : (responseJson?.amount || 1);
         content = `💳 Payment Received: ₹${paidAmount}.00`;
       } else {
         content = "[Interactive]";
@@ -708,6 +742,7 @@ export class WebhookService {
                 time: selectedTime,
                 status: 'booked',
                 booked_by_contact_id: contactId,
+                conversation_id: convId,
                 booked_by_name: customerName,
                 booked_by_phone: conversation.phone_number
               }).catch(async () => null);
