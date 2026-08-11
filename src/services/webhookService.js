@@ -169,6 +169,9 @@ export class WebhookService {
                 const Conversation = (await import("../models/Conversation.js")).default;
                 const conv = await Conversation.findOne({ phone_number: recipientPhone, workflow_id: { $ne: null } });
                 if (conv) {
+                  const waAcc = await WhatsAppAccount.findOne({
+                    $or: [{ phone_number_id: phoneNumberId }, { waba_id: wabaId }],
+                  }).sort({ updatedAt: -1 });
                   const Contact = (await import("../models/Contact.js")).default;
                   const contact = await Contact.findOne({ user_id: conv.user_id, phone_number: recipientPhone });
                   await this.checkWorkflow(
@@ -177,7 +180,7 @@ export class WebhookService {
                     "[Payment Completed]",
                     null,
                     phoneNumberId,
-                    wabaId,
+                    waAcc?.access_token || process.env.WA_TOKEN,
                     conv._id,
                     contact?._id
                   ).catch(console.error);
@@ -673,6 +676,9 @@ export class WebhookService {
           }
           await conversation.save().catch(() => {});
 
+          action = workflow.actions?.find((a) => a.id === currentStep.next_step);
+          isContinuation = Boolean(action);
+        } else if (currentStep && currentStep.type === "payment_invoice") {
           action = workflow.actions?.find((a) => a.id === currentStep.next_step);
           isContinuation = Boolean(action);
         }
