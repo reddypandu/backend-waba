@@ -21,7 +21,7 @@ const WorkflowTransactionSchema = new mongoose.Schema({
   transaction_id: { type: String }, // Razorpay Payment ID or Order ID
   upi_id: { type: String }, // Target UPI ID for the payment
   
-  status: { type: String, enum: ['in_progress', 'completed', 'cancelled'], default: 'in_progress' },
+  status: { type: String, enum: ['in_progress', 'completed', 'cancelled', 'pending', 'failed'], default: 'in_progress' },
 }, { timestamps: true });
 
 export const WorkflowTransaction = mongoose.model('WorkflowTransaction', WorkflowTransactionSchema);

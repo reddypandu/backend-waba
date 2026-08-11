@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import WhatsAppAccount from "../models/WhatsAppAccount.js";
 import Contact from "../models/Contact.js";
 import Message from "../models/Message.js";
@@ -5,6 +6,7 @@ import Template from "../models/Template.js";
 import { AutoReply, Workflow } from "../models/Automation.js";
 import Conversation from "../models/Conversation.js";
 import Campaign from "../models/Campaign.js";
+import { WorkflowTransaction } from "../models/WorkflowTransaction.js";
 import { normalizePhone } from "../utils/phoneUtils.js";
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v22.0";
 const META_API = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -318,12 +320,18 @@ export class WebhookService {
       } else if (msg.interactive?.type === "payment_status") {
         content = `💳 Payment Received: ₹1.00`;
         const refId = msg.interactive.payment_status?.reference_id;
+        const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
+        let tx = null;
         if (refId && mongoose.Types.ObjectId.isValid(refId)) {
-          const WorkflowTransaction = (await import("../models/WorkflowTransaction.js")).WorkflowTransaction;
-          await WorkflowTransaction.findByIdAndUpdate(refId, {
-            payment_status: "completed",
-            status: "completed"
-          }).catch(() => {});
+          tx = await WorkflowTransaction.findByIdAndUpdate(refId, { payment_status: "completed", status: "completed" }, { new: true });
+        }
+        if (!tx && normalizedPhone) {
+          const last10 = normalizedPhone.slice(-10);
+          tx = await WorkflowTransaction.findOneAndUpdate(
+            { phone_number: { $regex: last10 + "$" } },
+            { payment_status: "completed", status: "completed" },
+            { sort: { createdAt: -1 }, new: true }
+          );
         }
       } else {
         content = "[Interactive]";
@@ -847,7 +855,8 @@ export class WebhookService {
           ]
         }).sort({ createdAt: -1 });
 
-        const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
+        const isPaymentText = text && (String(text).includes("Payment Completed") || String(text).includes("Payment Received"));
+        const isPaid = isPaymentText || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
 
         if (isPaid) {
           // Send payment receipt confirmation message to customer
@@ -1103,7 +1112,9 @@ export class WebhookService {
         ]
       }).sort({ createdAt: -1 });
 
-      const isPaid = (text === "[Payment Completed]") || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
+      const lastMsg = conversation.last_message || "";
+      const isPaymentText = lastMsg && (String(lastMsg).includes("Payment Completed") || String(lastMsg).includes("Payment Received"));
+      const isPaid = isPaymentText || (tx && (tx.payment_status === "completed" || tx.status === "completed"));
       const customerName = conversation.variables?.customer_name || conversation.name || "Customer";
       const orderId = tx?._id ? tx._id.toString().substring(0, 8).toUpperCase() : Math.floor(100000 + Math.random() * 900000);
       const serviceName = tx?.service_name || workflow.name || "Service Booking";
